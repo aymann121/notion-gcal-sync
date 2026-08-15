@@ -208,7 +208,17 @@ def list_gcal_events_from_notion():
 
 
 def parse_dt(s):
-    return datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
+    """Parse an ISO timestamp into a timezone-aware UTC datetime."""
+    dt = datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    else:
+        dt = dt.astimezone(datetime.timezone.utc)
+    return dt
+
+
+def utc_now_iso():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
 def sync():
@@ -230,7 +240,7 @@ def sync():
             # brand-new task -> create a Google event
             event = create_gcal_event(title, due, page_id)
             set_notion_gcal_id(page_id, event["id"])
-            state[page_id] = {"last_sync": datetime.datetime.utcnow().isoformat()}
+            state[page_id] = {"last_sync": utc_now_iso()}
             continue
 
         seen_event_ids.add(event_id)
@@ -265,7 +275,7 @@ def sync():
             # both changed since last sync -> Notion wins (adjust if you'd rather Google win)
             update_gcal_event(event_id, title=title, date_str=due)
 
-        state[page_id] = {"last_sync": datetime.datetime.utcnow().isoformat()}
+        state[page_id] = {"last_sync": utc_now_iso()}
 
     # 2. Any tagged Google events with no matching Notion page? (Notion task deleted)
     for event_id, event in gcal_events.items():
