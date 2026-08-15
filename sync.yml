@@ -1,0 +1,40 @@
+name: Notion <-> Google Calendar Sync
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # every 15 minutes
+  workflow_dispatch: {}       # lets you trigger it manually from the Actions tab
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: Restore sync state
+        uses: actions/cache@v4
+        with:
+          path: sync_state.json
+          key: sync-state-${{ github.run_id }}
+          restore-keys: sync-state-
+
+      - run: python sync.py
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
+          GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
+
+      - name: Commit updated sync state
+        run: |
+          git config user.name "sync-bot"
+          git config user.email "sync-bot@users.noreply.github.com"
+          git add sync_state.json
+          git diff --quiet --cached || git commit -m "Update sync state [skip ci]"
+          git push
