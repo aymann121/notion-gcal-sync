@@ -5,11 +5,17 @@ on:
     - cron: "*/15 * * * *"   # every 15 minutes
   workflow_dispatch: {}       # lets you trigger it manually from the Actions tab
 
+permissions:
+  contents: write
+
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so rebase can land cleanly when main moved mid-run.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -36,5 +42,21 @@ jobs:
           git config user.name "sync-bot"
           git config user.email "sync-bot@users.noreply.github.com"
           git add sync_state.json
-          git diff --quiet --cached || git commit -m "Update sync state [skip ci]"
-          git push
+          if git diff --quiet --cached; then
+            echo "No sync_state.json changes to commit."
+            exit 0
+          fi
+          git commit -m "Update sync state [skip ci]"
+
+          # Another run (or a human push) may have updated main while we synced.
+          # Rebase and retry instead of failing the job.
+          for i in 1 2 3 4 5; do
+            git pull --rebase origin "${GITHUB_REF_NAME}"
+            if git push origin "HEAD:${GITHUB_REF_NAME}"; then
+              exit 0
+            fi
+            echo "Push rejected (attempt $i); retrying..."
+            sleep $((i * 2))
+          done
+          echo "Failed to push sync state after retries."
+          exit 1
