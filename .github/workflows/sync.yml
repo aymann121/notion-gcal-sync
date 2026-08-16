@@ -1,4 +1,4 @@
-name: Notion <-> Google Calendar Sync
+name: Notion <-> Google Tasks + Calendar Sync
 
 on:
   schedule:
