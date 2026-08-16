@@ -1,4 +1,6 @@
 .venv/
+.kimi-code/
+.cursor/
 __pycache__/
 *.pyc
 token.json

@@ -1,24 +1,16 @@
 #!/usr/bin/env python3
 """
-Two-way sync between a Notion database (Tasks Tracker) and Google Tasks + Calendar.
+Two-way sync: Notion Tasks Tracker ↔ Google Tasks + Google Calendar.
 
-Routing (Notion "Sync As" property)
------------------------------------
-- Task (or empty) → Google Tasks. Course → task list; Status ↔ completion.
-- Event → Google Calendar all-day events (title + due date), both directions.
+Routing via Notion "Sync As":
+  Task (or empty) → Google Tasks  (Course → list; Status ↔ completion)
+  Event           → Google Calendar (all-day; title + due)
 
-How it works
-------------
-- Linked IDs are stored on the Notion page ("Google Task ID" / "Google Event ID").
-- Each sync compares Notion last_edited_time vs Google updated since last_sync;
-  whichever side changed more recently wins. Both changed → Notion wins.
-- New Event rows create Calendar events tagged with notion_page_id; tagged
-  Google events without a Notion page create a Notion Event row.
-- New Task rows create Google Tasks; unlinked Google Tasks are not imported
-  (Tasks API has no extended properties).
-- Deletions are NOT auto-propagated by default. See DELETE_SYNC below.
+Conflict rule: compare last_edited_time / updated vs last_sync;
+whichever side changed more recently wins. Both changed → Notion wins.
 
-Setup: see README.md.
+Linked IDs live on the Notion page (Google Task ID / Google Event ID).
+Deletions are not mirrored unless DELETE_SYNC is True. See README.md.
 """
 
 import os
@@ -29,12 +21,13 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
-# ---- Config ---------------------------------------------------------------
+# ---- Config -----------------------------------------------------------------
 
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
 NOTION_DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
 GOOGLE_CALENDAR_ID = os.environ.get("GOOGLE_CALENDAR_ID", "primary")
 
+# Must match property names in the Notion database exactly.
 PROP_TITLE = "Task name"
 PROP_DUE_DATE = "Due date"
 PROP_STATUS = "Status"
@@ -47,11 +40,12 @@ SYNC_AS_TASK = "Task"
 SYNC_AS_EVENT = "Event"
 STATUS_DONE = "Done"
 STATUS_NOT_STARTED = "Not started"
-DEFAULT_TASKLIST = "Inbox"
+DEFAULT_TASKLIST = "Inbox"  # used when a task has no Course
 
-# Set to True if you also want deleting a task/event to delete its counterpart.
+# If True, deleting on one side archives/deletes the other.
 DELETE_SYNC = False
 
+# Per-page last_sync (+ task/event ids) so we know which side changed.
 STATE_FILE = "sync_state.json"
 
 # ---- Clients ----------------------------------------------------------------
@@ -60,6 +54,7 @@ notion = NotionClient(auth=NOTION_TOKEN)
 
 
 def get_google_credentials():
+    """Load OAuth token from env; refresh if expired."""
     creds = Credentials.from_authorized_user_info(
         json.loads(os.environ["GOOGLE_TOKEN_JSON"])
     )
@@ -91,7 +86,7 @@ def save_state(state):
 
 
 def get_notion_pages():
-    """Fetch all pages in the Tasks Tracker (no due-date filter)."""
+    """All Tasks Tracker rows (tasks may have no due date; events need one later)."""
     pages = []
     cursor = None
     while True:
@@ -107,6 +102,7 @@ def get_notion_pages():
 
 
 def rich_text_plain(page, prop_name):
+    """First plain-text chunk of a rich_text property, or None."""
     rt = page["properties"].get(prop_name, {}).get("rich_text", [])
     return rt[0]["plain_text"] if rt else None
 
@@ -118,6 +114,7 @@ def notion_title(page):
 
 
 def notion_due_date(page):
+    """YYYY-MM-DD only (time portion discarded)."""
     d = page["properties"].get(PROP_DUE_DATE, {}).get("date")
     if not d:
         return None
@@ -152,10 +149,10 @@ _course_title_cache = {}
 
 
 def course_title(page_id):
+    """Resolve a Course relation page to its title (cached per run)."""
     if page_id in _course_title_cache:
         return _course_title_cache[page_id]
     course = notion.pages.retrieve(page_id=page_id)
-    # Course Name is the title property on the Courses database
     title_prop = None
     for prop in course["properties"].values():
         if prop["type"] == "title":
@@ -168,6 +165,7 @@ def course_title(page_id):
 
 
 def notion_tasklist_name(page):
+    """Google Task list name = first Course title, else Inbox."""
     ids = notion_course_page_ids(page)
     if not ids:
         return DEFAULT_TASKLIST
@@ -175,6 +173,7 @@ def notion_tasklist_name(page):
 
 
 def is_task_row(page):
+    """Empty Sync As defaults to Task."""
     sync_as = notion_sync_as(page)
     return sync_as is None or sync_as == SYNC_AS_TASK
 
@@ -228,6 +227,7 @@ def set_notion_status(page_id, status_name):
 
 
 def create_notion_event(title, date_str, event_id):
+    """Create a Notion row from a Google Calendar event (Sync As = Event)."""
     return notion.pages.create(
         parent={"database_id": NOTION_DATABASE_ID},
         properties={
@@ -240,10 +240,12 @@ def create_notion_event(title, date_str, event_id):
 
 
 def status_to_gtasks(status_name):
+    """Notion Done → completed; anything else → needsAction."""
     return "completed" if status_name == STATUS_DONE else "needsAction"
 
 
 def gtasks_to_status(gtasks_status):
+    """Google completed → Done; else Not started (not In progress)."""
     return STATUS_DONE if gtasks_status == "completed" else STATUS_NOT_STARTED
 
 
@@ -260,6 +262,7 @@ def get_gcal_event(event_id):
 
 
 def create_gcal_event(title, date_str, notion_page_id):
+    """All-day event tagged with notion_page_id for reverse lookup."""
     event = {
         "summary": title,
         "start": {"date": date_str[:10]},
@@ -282,7 +285,7 @@ def update_gcal_event(event_id, title=None, date_str=None):
 
 
 def list_gcal_events_from_notion():
-    """List events this script created (tagged with notion_page_id)."""
+    """Events previously created by this script (private notion_page_id tag)."""
     events = []
     page_token = None
     while True:
@@ -301,10 +304,11 @@ def list_gcal_events_from_notion():
 
 # ---- Google Tasks helpers ---------------------------------------------------
 
-_tasklist_cache = None  # name -> id
+_tasklist_cache = None  # title → list id
 
 
 def refresh_tasklist_cache():
+    """Load all Google Task lists into _tasklist_cache."""
     global _tasklist_cache
     _tasklist_cache = {}
     page_token = None
@@ -319,6 +323,7 @@ def refresh_tasklist_cache():
 
 
 def ensure_tasklist(name):
+    """Return list id for name; create the list if missing."""
     if _tasklist_cache is None:
         refresh_tasklist_cache()
     if name in _tasklist_cache:
@@ -329,6 +334,7 @@ def ensure_tasklist(name):
 
 
 def due_to_gtasks(date_str):
+    """Tasks API wants RFC3339; only the date part is kept (midnight UTC)."""
     if not date_str:
         return None
     return f"{date_str[:10]}T00:00:00.000Z"
@@ -347,7 +353,7 @@ def get_gtask(tasklist_id, task_id):
 
 
 def find_gtask(task_id, preferred_list_id=None):
-    """Locate a task by id; try preferred list first, then all lists."""
+    """Find a task by id (try known list first, then scan all lists)."""
     if preferred_list_id:
         task = get_gtask(preferred_list_id, task_id)
         if task is not None:
@@ -389,6 +395,7 @@ def update_gtask(tasklist_id, task_id, title=None, due=None, status=None, clear_
 
 
 def move_gtask(task_id, from_list_id, to_list_id):
+    """Move task when Notion Course (list) changes."""
     if from_list_id == to_list_id:
         return
     gtasks.tasks().move(
@@ -399,7 +406,7 @@ def move_gtask(task_id, from_list_id, to_list_id):
 
 
 def list_all_gtasks():
-    """Return dict task_id -> (list_id, task) across all lists."""
+    """task_id → (list_id, task), including completed/hidden."""
     if _tasklist_cache is None:
         refresh_tasklist_cache()
     result = {}
@@ -425,7 +432,7 @@ def list_all_gtasks():
 
 
 def parse_dt(s):
-    """Parse an ISO timestamp into a timezone-aware UTC datetime."""
+    """ISO timestamp → timezone-aware UTC datetime."""
     dt = datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=datetime.timezone.utc)
@@ -439,6 +446,7 @@ def utc_now_iso():
 
 
 def last_sync_dt(state, page_id):
+    """When we last successfully synced this page (or epoch if never)."""
     last_sync = state.get(page_id, {}).get("last_sync")
     if last_sync:
         return parse_dt(last_sync)
@@ -446,6 +454,7 @@ def last_sync_dt(state, page_id):
 
 
 def sync_event_pages(state, event_pages):
+    """Sync As = Event ↔ Google Calendar all-day events."""
     gcal_events = {e["id"]: e for e in list_gcal_events_from_notion()}
     seen_event_ids = set()
 
@@ -454,11 +463,12 @@ def sync_event_pages(state, event_pages):
         title = notion_title(page)
         due = notion_due_date(page)
         if not due:
-            continue
+            continue  # calendar events require a due date
 
         event_id = notion_gcal_id(page)
         notion_edited = parse_dt(page["last_edited_time"])
 
+        # New Notion event → create Calendar event and store its id
         if not event_id:
             event = create_gcal_event(title, due, page_id)
             set_notion_gcal_id(page_id, event["id"])
@@ -471,6 +481,8 @@ def sync_event_pages(state, event_pages):
 
         seen_event_ids.add(event_id)
         event = gcal_events.get(event_id) or get_gcal_event(event_id)
+
+        # Google event missing: archive Notion or recreate the event
         if event is None:
             if DELETE_SYNC:
                 notion.pages.update(page_id=page_id, archived=True)
@@ -485,6 +497,7 @@ def sync_event_pages(state, event_pages):
                 }
             continue
 
+        # Decide which side wins since last_sync
         google_updated = parse_dt(event["updated"])
         last = last_sync_dt(state, page_id)
         notion_changed = notion_edited > last
@@ -498,7 +511,7 @@ def sync_event_pages(state, event_pages):
             set_notion_title(page_id, g_title)
             set_notion_due_date(page_id, g_date)
         elif notion_changed and google_changed:
-            update_gcal_event(event_id, title=title, date_str=due)
+            update_gcal_event(event_id, title=title, date_str=due)  # Notion wins
 
         state[page_id] = {
             "last_sync": utc_now_iso(),
@@ -506,7 +519,7 @@ def sync_event_pages(state, event_pages):
             "event_id": event_id,
         }
 
-    # Tagged Google events whose Notion page is gone/archived
+    # Tagged Calendar events whose Notion page was deleted
     for event_id, event in gcal_events.items():
         if event_id in seen_event_ids:
             continue
@@ -529,7 +542,7 @@ def sync_event_pages(state, event_pages):
             ).execute()
             continue
 
-        # Recreate a Notion Event row from the tagged Google event
+        # Recreate Notion Event row and retag the Calendar event
         g_title = event.get("summary", "(untitled)")
         g_date = event["start"].get("date") or (
             event["start"].get("dateTime", "")[:10] or None
@@ -554,6 +567,7 @@ def sync_event_pages(state, event_pages):
 
 
 def sync_task_pages(state, task_pages):
+    """Sync As = Task (or empty) ↔ Google Tasks."""
     refresh_tasklist_cache()
     ensure_tasklist(DEFAULT_TASKLIST)
     all_gtasks = list_all_gtasks()
@@ -571,6 +585,7 @@ def sync_task_pages(state, task_pages):
         notion_edited = parse_dt(page["last_edited_time"])
         prev = state.get(page_id, {})
 
+        # New Notion task → create Google Task and store its id
         if not task_id:
             task = create_gtask(target_list_id, title, due=due, status=g_status)
             set_notion_gtask_id(page_id, task["id"])
@@ -584,12 +599,12 @@ def sync_task_pages(state, task_pages):
 
         seen_task_ids.add(task_id)
         preferred = prev.get("tasklist_id")
-        list_id, task = None, None
         if task_id in all_gtasks:
             list_id, task = all_gtasks[task_id]
         else:
             list_id, task = find_gtask(task_id, preferred)
 
+        # Google task missing: archive Notion or recreate the task
         if task is None:
             if DELETE_SYNC:
                 notion.pages.update(page_id=page_id, archived=True)
@@ -607,10 +622,10 @@ def sync_task_pages(state, task_pages):
                 }
             continue
 
+        # Course changed → move to the matching task list
         if list_id != target_list_id:
             move_gtask(task_id, list_id, target_list_id)
             list_id = target_list_id
-            # refresh task after move
             task = get_gtask(list_id, task_id) or task
 
         google_updated = parse_dt(task["updated"])
@@ -641,7 +656,7 @@ def sync_task_pages(state, task_pages):
                 due=due,
                 status=g_status,
                 clear_due=clear_due,
-            )
+            )  # Notion wins
 
         state[page_id] = {
             "last_sync": utc_now_iso(),
@@ -650,7 +665,7 @@ def sync_task_pages(state, task_pages):
             "tasklist_id": list_id,
         }
 
-    # Orphan Google tasks that we previously linked but Notion page is gone
+    # State entries whose Notion page is gone (no Google→Notion create for tasks)
     for page_id, entry in list(state.items()):
         if entry.get("kind") != "task":
             continue
@@ -675,6 +690,7 @@ def sync_task_pages(state, task_pages):
 
 
 def sync():
+    """One full pass: Tasks path, then Events path, then persist state."""
     state = load_state()
     pages = get_notion_pages()
 
