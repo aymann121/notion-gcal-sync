@@ -52,12 +52,16 @@ Actions every 15 minutes.
 ### How Tasks routing works
 
 - Each Notion task’s first **Course** relation becomes a **Google Task list**
-  (created if it doesn’t exist). No course → list named `Inbox`.
+  (created if it doesn’t exist). No course → Google’s default **My Tasks** list.
 - Notion `Status = Done` ↔ Google Task `completed`; anything else ↔
   `needsAction`. Completing a task in Google Tasks (or the Calendar sidebar)
   sets Notion to `Done`, and vice versa.
-- Unlinked Google Tasks are **not** imported into Notion (Tasks API has no
-  place to store a Notion page id).
+- Creating a task directly in Google Tasks (in any list, including My Tasks)
+  creates the matching Notion row on the next sync — creating a new **Course**
+  page too if the list name doesn’t already match one. Only active
+  (`needsAction`) unlinked tasks are imported this way; completed tasks that
+  were never linked to Notion are left alone. Deleting the Notion side of a
+  linked task stops it from being re-imported.
 
 ### How Event routing works
 

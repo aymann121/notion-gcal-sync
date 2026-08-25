@@ -40,7 +40,6 @@ SYNC_AS_TASK = "Task"
 SYNC_AS_EVENT = "Event"
 STATUS_DONE = "Done"
 STATUS_NOT_STARTED = "Not started"
-DEFAULT_TASKLIST = "Inbox"  # used when a task has no Course
 
 # If True, deleting on one side archives/deletes the other.
 DELETE_SYNC = False
@@ -164,12 +163,68 @@ def course_title(page_id):
     return name
 
 
-def notion_tasklist_name(page):
-    """Google Task list name = first Course title, else Inbox."""
+def notion_target_tasklist_id(page):
+    """Google Task list id = first Course's list, else Google's default list."""
     ids = notion_course_page_ids(page)
     if not ids:
-        return DEFAULT_TASKLIST
-    return course_title(ids[0])
+        return get_default_tasklist_id()
+    return ensure_tasklist(course_title(ids[0]))
+
+
+_courses_database_id = None
+_course_pages_cache = None  # title → page_id
+_course_title_prop_name = None
+
+
+def get_courses_database_id():
+    """Target database id of the Course relation property (cached)."""
+    global _courses_database_id
+    if _courses_database_id is None:
+        db = notion.databases.retrieve(database_id=NOTION_DATABASE_ID)
+        _courses_database_id = db["properties"][PROP_COURSE]["relation"]["database_id"]
+    return _courses_database_id
+
+
+def refresh_course_cache():
+    """Load all Courses pages (title → page_id) and find the title property name."""
+    global _course_pages_cache, _course_title_prop_name
+    courses_db_id = get_courses_database_id()
+    db = notion.databases.retrieve(database_id=courses_db_id)
+    for name, prop in db["properties"].items():
+        if prop["type"] == "title":
+            _course_title_prop_name = name
+            break
+
+    _course_pages_cache = {}
+    cursor = None
+    while True:
+        kwargs = {"database_id": courses_db_id}
+        if cursor:
+            kwargs["start_cursor"] = cursor
+        resp = notion.databases.query(**kwargs)
+        for page in resp["results"]:
+            title_prop = page["properties"].get(_course_title_prop_name, {})
+            name = "".join(t["plain_text"] for t in title_prop.get("title", []))
+            if name:
+                _course_pages_cache[name] = page["id"]
+        if not resp.get("has_more"):
+            break
+        cursor = resp["next_cursor"]
+    return _course_pages_cache
+
+
+def ensure_course(name):
+    """Return page id for a Course with this title; create it if missing."""
+    if _course_pages_cache is None:
+        refresh_course_cache()
+    if name in _course_pages_cache:
+        return _course_pages_cache[name]
+    created = notion.pages.create(
+        parent={"database_id": get_courses_database_id()},
+        properties={_course_title_prop_name: {"title": [{"text": {"content": name}}]}},
+    )
+    _course_pages_cache[name] = created["id"]
+    return created["id"]
 
 
 def is_task_row(page):
@@ -239,6 +294,21 @@ def create_notion_event(title, date_str, event_id):
     )
 
 
+def create_notion_task(title, due, task_id, status_name, course_page_id=None):
+    """Create a Notion row from a Google Task (Sync As = Task)."""
+    properties = {
+        PROP_TITLE: {"title": [{"text": {"content": title}}]},
+        PROP_STATUS: {"status": {"name": status_name}},
+        PROP_GTASK_ID: {"rich_text": [{"text": {"content": task_id}}]},
+        PROP_SYNC_AS: {"select": {"name": SYNC_AS_TASK}},
+    }
+    if due:
+        properties[PROP_DUE_DATE] = {"date": {"start": due[:10]}}
+    if course_page_id:
+        properties[PROP_COURSE] = {"relation": [{"id": course_page_id}]}
+    return notion.pages.create(parent={"database_id": NOTION_DATABASE_ID}, properties=properties)
+
+
 def status_to_gtasks(status_name):
     """Notion Done → completed; anything else → needsAction."""
     return "completed" if status_name == STATUS_DONE else "needsAction"
@@ -305,17 +375,29 @@ def list_gcal_events_from_notion():
 # ---- Google Tasks helpers ---------------------------------------------------
 
 _tasklist_cache = None  # title → list id
+_tasklist_titles = None  # list id → title
+_default_tasklist_id = None  # Google's "My Tasks" list id (resolved, not the alias)
+
+
+def get_default_tasklist_id():
+    """Real id of Google's default "My Tasks" list (the "@default" alias resolves to it)."""
+    global _default_tasklist_id
+    if _default_tasklist_id is None:
+        _default_tasklist_id = gtasks.tasklists().get(tasklist="@default").execute()["id"]
+    return _default_tasklist_id
 
 
 def refresh_tasklist_cache():
-    """Load all Google Task lists into _tasklist_cache."""
-    global _tasklist_cache
+    """Load all Google Task lists into _tasklist_cache / _tasklist_titles."""
+    global _tasklist_cache, _tasklist_titles
     _tasklist_cache = {}
+    _tasklist_titles = {}
     page_token = None
     while True:
         resp = gtasks.tasklists().list(pageToken=page_token, maxResults=100).execute()
         for tl in resp.get("items", []):
             _tasklist_cache[tl["title"]] = tl["id"]
+            _tasklist_titles[tl["id"]] = tl["title"]
         page_token = resp.get("nextPageToken")
         if not page_token:
             break
@@ -569,7 +651,6 @@ def sync_event_pages(state, event_pages):
 def sync_task_pages(state, task_pages):
     """Sync As = Task (or empty) ↔ Google Tasks."""
     refresh_tasklist_cache()
-    ensure_tasklist(DEFAULT_TASKLIST)
     all_gtasks = list_all_gtasks()
     seen_task_ids = set()
 
@@ -579,8 +660,7 @@ def sync_task_pages(state, task_pages):
         due = notion_due_date(page)
         status_name = notion_status(page)
         g_status = status_to_gtasks(status_name)
-        list_name = notion_tasklist_name(page)
-        target_list_id = ensure_tasklist(list_name)
+        target_list_id = notion_target_tasklist_id(page)
         task_id = notion_gtask_id(page)
         notion_edited = parse_dt(page["last_edited_time"])
         prev = state.get(page_id, {})
@@ -667,7 +747,7 @@ def sync_task_pages(state, task_pages):
 
     # State entries whose Notion page is gone (no Google→Notion create for tasks)
     for page_id, entry in list(state.items()):
-        if entry.get("kind") != "task":
+        if not isinstance(entry, dict) or entry.get("kind") != "task":
             continue
         task_id = entry.get("task_id")
         if not task_id or task_id in seen_task_ids:
@@ -686,7 +766,46 @@ def sync_task_pages(state, task_pages):
                         ).execute()
                     except Exception:
                         pass
+            else:
+                # Leave the orphaned Google task alone, but never re-import it.
+                ignored = set(state.get("_ignored_task_ids", []))
+                ignored.add(task_id)
+                state["_ignored_task_ids"] = sorted(ignored)
             state.pop(page_id, None)
+
+    import_unlinked_gtasks(state, all_gtasks, seen_task_ids)
+
+
+def import_unlinked_gtasks(state, all_gtasks, linked_task_ids):
+    """Create Notion rows for active Google Tasks not yet linked to any page."""
+    ignored = set(state.get("_ignored_task_ids", []))
+    default_list_id = get_default_tasklist_id()
+
+    for task_id, (list_id, task) in all_gtasks.items():
+        if task_id in linked_task_ids or task_id in ignored:
+            continue
+        if task.get("status") != "needsAction":
+            continue
+
+        course_page_id = None
+        if list_id != default_list_id:
+            list_title = _tasklist_titles.get(list_id)
+            if list_title:
+                course_page_id = ensure_course(list_title)
+
+        new_page = create_notion_task(
+            task.get("title") or "(untitled)",
+            due_from_gtasks(task),
+            task_id,
+            gtasks_to_status(task.get("status")),
+            course_page_id=course_page_id,
+        )
+        state[new_page["id"]] = {
+            "last_sync": utc_now_iso(),
+            "kind": "task",
+            "task_id": task_id,
+            "tasklist_id": list_id,
+        }
 
 
 def sync():
