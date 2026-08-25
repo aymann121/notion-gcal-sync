@@ -198,12 +198,34 @@ def get_data_source_properties(database_id):
     return data_source["properties"]
 
 
+def find_course_relation_property(props):
+    """Locate the Course relation's property definition.
+
+    Matches by type ("relation") rather than the configured PROP_COURSE
+    name. Notion's schema shape has shifted more than once recently
+    (multi-source databases, and apparently the data source properties
+    shape itself), so name-based matching keeps breaking; this database
+    has exactly one relation-typed property, so type-matching is the more
+    durable signal.
+    """
+    if PROP_COURSE in props and props[PROP_COURSE].get("type") == "relation":
+        return props[PROP_COURSE]
+    relations = {name: p for name, p in props.items() if p.get("type") == "relation"}
+    if len(relations) == 1:
+        return next(iter(relations.values()))
+    raise RuntimeError(
+        f"Could not find the '{PROP_COURSE}' relation property. "
+        f"Available properties: {[(n, p.get('type')) for n, p in props.items()]}"
+    )
+
+
 def get_courses_database_id():
     """Target database id of the Course relation property (cached)."""
     global _courses_database_id
     if _courses_database_id is None:
         props = get_data_source_properties(NOTION_DATABASE_ID)
-        _courses_database_id = props[PROP_COURSE]["relation"]["database_id"]
+        relation = find_course_relation_property(props)
+        _courses_database_id = relation["relation"]["database_id"]
     return _courses_database_id
 
 
