@@ -175,13 +175,35 @@ _courses_database_id = None
 _course_pages_cache = None  # title → page_id
 _course_title_prop_name = None
 
+# Notion's 2025 multi-source-database split moved property schemas off the
+# database object onto a separate "data source" object; the pinned
+# notion-client SDK (2.2.1) predates that split and has no data_sources
+# endpoint. GET/query/create for pages still work fine on the old default
+# version everywhere else in this script — only schema lookups need this.
+NOTION_LATEST_VERSION = "2026-03-11"
+
+
+def notion_get(path, notion_version):
+    """Raw GET via the underlying httpx client, on a specific Notion-Version."""
+    response = notion.client.get(path, headers={"Notion-Version": notion_version})
+    response.raise_for_status()
+    return response.json()
+
+
+def get_data_source_properties(database_id):
+    """Property schema of a database's (first) data source."""
+    db = notion_get(f"databases/{database_id}", NOTION_LATEST_VERSION)
+    data_source_id = db["data_sources"][0]["id"]
+    data_source = notion_get(f"data_sources/{data_source_id}", NOTION_LATEST_VERSION)
+    return data_source["properties"]
+
 
 def get_courses_database_id():
     """Target database id of the Course relation property (cached)."""
     global _courses_database_id
     if _courses_database_id is None:
-        db = notion.databases.retrieve(database_id=NOTION_DATABASE_ID)
-        _courses_database_id = db["properties"][PROP_COURSE]["relation"]["database_id"]
+        props = get_data_source_properties(NOTION_DATABASE_ID)
+        _courses_database_id = props[PROP_COURSE]["relation"]["database_id"]
     return _courses_database_id
 
 
@@ -189,8 +211,8 @@ def refresh_course_cache():
     """Load all Courses pages (title → page_id) and find the title property name."""
     global _course_pages_cache, _course_title_prop_name
     courses_db_id = get_courses_database_id()
-    db = notion.databases.retrieve(database_id=courses_db_id)
-    for name, prop in db["properties"].items():
+    props = get_data_source_properties(courses_db_id)
+    for name, prop in props.items():
         if prop["type"] == "title":
             _course_title_prop_name = name
             break
