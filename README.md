@@ -2,12 +2,23 @@
 
 Keeps your **Tasks Tracker** database in sync with **Google Tasks** and
 **Google Calendar**, routed by the `Sync As` property. Runs free on GitHub
-Actions every 15 minutes.
+Actions four times a day (9am/2pm/6pm/12am ET).
 
 | `Sync As` | Destination | What syncs |
 |-----------|-------------|------------|
 | `Task` or empty | Google Tasks | Title, due date (optional), Status ↔ completion. Course → task list |
 | `Event` | Google Calendar | Title + due date as an all-day event (both directions) |
+
+### Archived tasks
+
+`notion-task-radar` marks Radar tasks `Archived` at 1am when their day ends
+unfinished. This sync treats `Archived` the same as `Done` — the Google Task
+gets ticked off, so missed work clears out of Google Tasks instead of piling
+up. If the task was never in Google, it's created and then completed.
+
+Notion keeps the distinction Google can't express: the row stays `Archived`,
+not `Done`, so you can still tell what you missed from what you finished.
+Un-ticking the task in Google brings the Notion row back to `Not started`.
 
 ## 1. Notion setup
 
@@ -19,7 +30,10 @@ Actions every 15 minutes.
 3. Ensure these properties exist (names must match exactly):
    - **Text:** `Google Event ID`, `Google Task ID` (script-managed — leave blank)
    - **Select:** `Sync As` with options `Task` and `Event`
-   - **Status:** `Status` with at least `Not started`, `In progress`, `Done`
+   - **Status:** `Status` with at least `Not started`, `In progress`, `Done`,
+     and `Archived` (orange, in the **Complete** group). The Notion API cannot
+     create status options, so `Archived` must be added by hand: Status column
+     header → **Edit property** → **+ Add option**.
    - **Relation:** `Course` (to your Courses database)
    - **Title / Date:** `Task name`, `Due date`
 4. Get your database ID: open the database as a full page, copy the URL —
@@ -79,8 +93,8 @@ Actions every 15 minutes.
    - `NOTION_DATABASE_ID` — from step 1
    - `GOOGLE_CALENDAR_ID` — from step 2
    - `GOOGLE_TOKEN_JSON` — paste the full contents of `token.json`
-3. That’s it. The workflow in `.github/workflows/sync.yml` runs every 15
-   minutes automatically. You can also trigger it manually from the repo’s
+3. That’s it. The workflow in `.github/workflows/sync.yml` runs four times a
+   day automatically. You can also trigger it manually from the repo’s
    **Actions** tab → "Notion <-> Google Tasks + Calendar Sync" → **Run workflow**.
 
 ## How conflicts are resolved

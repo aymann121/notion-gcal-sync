@@ -40,6 +40,10 @@ SYNC_AS_TASK = "Task"
 SYNC_AS_EVENT = "Event"
 STATUS_DONE = "Done"
 STATUS_NOT_STARTED = "Not started"
+# Written by notion-task-radar when a Radar task ends its day unfinished.
+# Terminal like Done, so it completes the Google Task -- but it must never be
+# overwritten *by* a completed Google Task (see resolve_notion_status).
+STATUS_ARCHIVED = "Archived"
 
 # If True, deleting on one side archives/deletes the other.
 DELETE_SYNC = False
@@ -354,13 +358,34 @@ def create_notion_task(title, due, task_id, status_name, course_page_id=None):
 
 
 def status_to_gtasks(status_name):
-    """Notion Done → completed; anything else → needsAction."""
-    return "completed" if status_name == STATUS_DONE else "needsAction"
+    """Notion Done or Archived → completed; anything else → needsAction."""
+    return (
+        "completed"
+        if status_name in (STATUS_DONE, STATUS_ARCHIVED)
+        else "needsAction"
+    )
 
 
 def gtasks_to_status(gtasks_status):
     """Google completed → Done; else Not started (not In progress)."""
     return STATUS_DONE if gtasks_status == "completed" else STATUS_NOT_STARTED
+
+
+def resolve_notion_status(current_status, gtasks_status):
+    """What Notion's Status should become when Google is the side that changed.
+
+    Google Tasks has two states; Notion has three outcomes that matter --
+    finished, missed, and pending. Completing an archived task bumps its
+    Google `updated` timestamp, so the very next run sees "Google changed,
+    Notion didn't" and would map completed → Done, silently rewriting every
+    task you *missed* as one you *finished* and emptying the Archived view.
+
+    Archived is terminal on the Notion side, so a completed Google task tells
+    us nothing new and must not clobber it.
+    """
+    if gtasks_status == "completed" and current_status == STATUS_ARCHIVED:
+        return STATUS_ARCHIVED
+    return gtasks_to_status(gtasks_status)
 
 
 # ---- Google Calendar helpers ------------------------------------------------
@@ -712,6 +737,13 @@ def sync_task_pages(state, task_pages):
         # New Notion task → create Google Task and store its id
         if not task_id:
             task = create_gtask(target_list_id, title, due=due, status=g_status)
+            if g_status == "completed":
+                # An already-archived (or already-done) row: create it, then
+                # complete it. The insert carries the status, but a follow-up
+                # patch is what reliably stamps Google's `completed` field, so
+                # the task lands in Google's Completed list instead of sitting
+                # in the active list looking like outstanding work.
+                update_gtask(target_list_id, task["id"], status="completed")
             set_notion_gtask_id(page_id, task["id"])
             state[page_id] = {
                 "last_sync": utc_now_iso(),
@@ -770,7 +802,9 @@ def sync_task_pages(state, task_pages):
         elif google_changed and not notion_changed:
             set_notion_title(page_id, task.get("title") or title)
             set_notion_due_date(page_id, due_from_gtasks(task))
-            set_notion_status(page_id, gtasks_to_status(task.get("status")))
+            set_notion_status(
+                page_id, resolve_notion_status(status_name, task.get("status"))
+            )
         elif notion_changed and google_changed:
             clear_due = due is None and bool(task.get("due"))
             update_gtask(

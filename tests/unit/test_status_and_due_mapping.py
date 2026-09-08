@@ -51,3 +51,29 @@ def test_due_from_gtasks_extracts_date_only():
 def test_due_from_gtasks_is_none_when_task_has_no_due():
     """Given a Google Task with no due field, due_from_gtasks returns None."""
     assert sync.due_from_gtasks({}) is None
+
+
+def test_status_archived_maps_to_completed():
+    """Given Notion Status "Archived", status_to_gtasks returns "completed" so the
+    Google Task gets ticked off rather than lingering as outstanding work."""
+    assert sync.status_to_gtasks("Archived") == "completed"
+
+
+def test_completed_google_task_does_not_overwrite_archived():
+    """Given a Notion page already marked "Archived", a completed Google Task leaves it
+    "Archived" -- completing the task is what the sync itself just did, so it carries no
+    new information and must not be read back as "Done"."""
+    assert sync.resolve_notion_status("Archived", "completed") == "Archived"
+
+
+def test_completed_google_task_still_marks_normal_pages_done():
+    """Given a Notion page that is not archived, resolve_notion_status keeps the ordinary
+    mapping: a completed Google Task means Done."""
+    assert sync.resolve_notion_status("Not started", "completed") == "Done"
+    assert sync.resolve_notion_status("In progress", "completed") == "Done"
+
+
+def test_reopened_google_task_clears_archived():
+    """Given an archived Notion page whose Google Task was un-ticked by hand,
+    resolve_notion_status falls through to "Not started" so the task comes back."""
+    assert sync.resolve_notion_status("Archived", "needsAction") == "Not started"

@@ -9,7 +9,9 @@ A single-file Python script (`sync.py`) that two-way syncs a Notion "Tasks Track
 - `Task` (or empty) → Google Tasks — title, due date, Status ↔ completion, Course relation → task list
 - `Event` → Google Calendar — title + due date as an all-day event (both directions)
 
-It runs on a schedule via GitHub Actions (`.github/workflows/sync.yml`, hourly cron + manual `workflow_dispatch`), committing its own state file back to the repo after each run.
+It runs on a schedule via GitHub Actions (`.github/workflows/sync.yml`, cron `0 13,18,22,4 * * *` — four times a day, 9am/2pm/6pm/12am ET — plus manual `workflow_dispatch`), committing its own state file back to the repo after each run.
+
+A companion repo, `notion-task-radar`, writes `Status = Archived` onto Radar-course tasks that ended their day unfinished. This script treats `Archived` as terminal and completes the matching Google Task — see "Archived tasks" below.
 
 ## Commands
 
@@ -19,7 +21,13 @@ python get_google_token.py        # one-time, locally only: OAuth flow, produces
 python sync.py                    # run one full sync pass
 ```
 
-There is no test suite, linter, or build step in this repo — it's a script run directly.
+There is no linter or build step in this repo — it's a script run directly. There *is* a three-layer test suite (`tests/unit`, `tests/integration` against `tests/fakes.py`, and an opt-in `tests/e2e`); see `tests/README.md`.
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+pytest                        # unit + integration; e2e excluded by pytest.ini
+pytest -m e2e tests/e2e -v    # needs E2E_ENABLE=1 and disposable resources
+```
 
 ### Required environment variables (for `sync.py`)
 
@@ -46,6 +54,17 @@ For every linked pair, compare `last_edited_time` (Notion) vs `updated` (Google)
 - Only one side changed since `last_sync` → the other side is updated to match.
 - Both changed → **Notion wins** (this is a hardcoded branch in each sync function, not a config flag).
 - Neither side has a link yet → a new object is created on the other side and the id is written back onto the Notion page (`Google Event ID` / `Google Task ID` rich_text properties).
+
+### Archived tasks
+
+`notion-task-radar` writes `Status = Archived` at 1am on Radar-course tasks that ended their day unfinished. Here, `Archived` is terminal like `Done`:
+
+- `status_to_gtasks` maps both `Done` and `Archived` → `completed`.
+- A page that is already `Archived` when it first syncs is **created then completed** — `create_gtask` carries the status, and a follow-up `update_gtask` patch is what reliably stamps Google's `completed` field so it lands in the Completed list rather than looking like outstanding work.
+
+The subtle part is the direction *back*. Completing the task bumps Google's `updated`, so the next run reaches the `google_changed and not notion_changed` branch, and the naive mapping (`completed` → `Done`) would silently rewrite every task you *missed* as one you *finished*, emptying the Archived view a run later. `resolve_notion_status` guards this: a completed Google task leaves an `Archived` page alone, because the sync itself is what completed it. `test_completed_google_task_never_rewrites_archived_as_done` is the regression test — it only fails on the *second* sync pass, so a single-run test wouldn't catch it.
+
+Un-ticking the Google task still revives the page (`Archived` + `needsAction` → `Not started`), so an accidental archive is recoverable from either side.
 
 ### Reverse-linking quirks
 

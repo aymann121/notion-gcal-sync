@@ -200,3 +200,63 @@ def test_delete_sync_true_can_reimport_the_task_it_just_deleted(fake_clients):
     assert "orphan-task" not in fake_clients["gtasks"]._tasks[DEFAULT_TASKLIST_ID]  # really deleted on Google
     reimported_pages = [p for p in fake_clients["notion"]._pages.values() if sync.notion_gtask_id(p) == "orphan-task"]
     assert len(reimported_pages) == 1  # ...but reimported into Notion anyway
+
+
+# ---- Archived tasks (written by notion-task-archiver) -----------------------
+
+
+def test_archived_notion_task_is_created_then_completed_in_google(fake_clients):
+    """Given an Archived Notion row that was never synced, sync_task_pages creates the
+    Google Task and completes it, so it lands in Google's Completed list instead of
+    appearing as outstanding work."""
+    page = make_task_page("page-1", title="Exercise (Run/Lift)", status="Archived", gtask_id=None)
+    fake_clients["notion"].add_page(page)
+    state = {}
+
+    sync.sync_task_pages(state, [page])
+
+    [created_task] = fake_clients["gtasks"]._tasks[DEFAULT_TASKLIST_ID].values()
+    assert created_task["status"] == "completed"
+    assert sync.notion_gtask_id(page) == created_task["id"]
+
+
+def test_archiving_in_notion_completes_the_existing_google_task(fake_clients):
+    """Given a Notion row newly set to Archived and an active Google Task, the Notion-changed
+    branch pushes completion to Google."""
+    page = make_task_page(
+        "page-1", title="Meal Prep", status="Archived",
+        gtask_id="task-1", last_edited_time="2026-01-02T00:00:00Z",
+    )
+    fake_clients["notion"].add_page(page)
+    fake_clients["gtasks"].add_task(
+        DEFAULT_TASKLIST_ID, make_gtask("task-1", title="Meal Prep", updated="2026-01-01T00:00:00Z")
+    )
+    state = {"page-1": {"last_sync": "2026-01-01T12:00:00Z", "kind": "task", "task_id": "task-1", "tasklist_id": DEFAULT_TASKLIST_ID}}
+
+    sync.sync_task_pages(state, [page])
+
+    assert fake_clients["gtasks"]._tasks[DEFAULT_TASKLIST_ID]["task-1"]["status"] == "completed"
+
+
+def test_completed_google_task_never_rewrites_archived_as_done(fake_clients):
+    """The regression this guard exists for.
+
+    Completing an archived task bumps Google's `updated`, so the next run sees
+    "Google changed, Notion didn't" -- the branch that maps completed -> Done. Without
+    the guard every task you *missed* would be silently recorded as one you *finished*,
+    and the Archived view would empty itself out one run later.
+    """
+    page = make_task_page(
+        "page-1", title="Exercise (Run/Lift)", status="Archived",
+        gtask_id="task-1", last_edited_time="2026-01-01T00:00:00Z",
+    )
+    fake_clients["notion"].add_page(page)
+    fake_clients["gtasks"].add_task(
+        DEFAULT_TASKLIST_ID,
+        make_gtask("task-1", title="Exercise (Run/Lift)", status="completed", updated="2026-01-02T00:00:00Z"),
+    )
+    state = {"page-1": {"last_sync": "2026-01-01T12:00:00Z", "kind": "task", "task_id": "task-1", "tasklist_id": DEFAULT_TASKLIST_ID}}
+
+    sync.sync_task_pages(state, [page])
+
+    assert sync.notion_status(page) == "Archived"
