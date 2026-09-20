@@ -72,10 +72,9 @@ Un-ticking the task in Google brings the Notion row back to `Not started`.
   sets Notion to `Done`, and vice versa.
 - Creating a task directly in Google Tasks (in any list, including My Tasks)
   creates the matching Notion row on the next sync — creating a new **Course**
-  page too if the list name doesn’t already match one. Only active
-  (`needsAction`) unlinked tasks are imported this way; completed tasks that
-  were never linked to Notion are left alone. Deleting the Notion side of a
-  linked task stops it from being re-imported.
+  page too if the list name doesn’t already match one. Nothing is skipped:
+  tasks you already ticked off are imported too, as `Status = Done`, so every
+  Google Task ends up with a Notion row.
 
 ### How Event routing works
 
@@ -107,15 +106,21 @@ Each sync run compares Notion’s `last_edited_time` against Google’s
 - Both changed → **Notion wins** (edit `sync.py` if you’d rather Google win).
 
 If you change `Sync As` between Task and Event, the script creates a link on
-the new side and does **not** delete the old Google object unless
-`DELETE_SYNC` is enabled.
+the new side and deletes the old Google object, since `DELETE_SYNC` is on.
 
 ## Deletions
 
-By default, deleting a task or event does **not** delete its counterpart
-(`DELETE_SYNC = False` in `sync.py`) — this avoids accidentally wiping data
-out while you’re still trusting the script. Flip it to `True` once you’re
-confident it’s working the way you want.
+Deleting a task or event deletes its counterpart (`DELETE_SYNC = True` in
+`sync.py`). It works both ways: deleting a Notion row deletes its Google Task
+or Calendar event, and deleting a Google Task archives its Notion row. Set the
+flag back to `False` for the older, non-destructive behavior, where a missing
+counterpart is recreated rather than propagated.
+
+Because a missing object is now taken as an instruction to delete, the script
+refuses to guess: only a real 404 from Notion or Google counts as "deleted".
+A rate-limit or a server error fails the run instead, so a bad API day can’t
+wipe out data. A failed run is safe to just re-run — nothing is committed to
+`sync_state.json` until the pass finishes.
 
 ## Limitations
 

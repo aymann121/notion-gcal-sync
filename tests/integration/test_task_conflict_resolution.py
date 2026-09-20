@@ -151,23 +151,22 @@ def test_missing_google_task_archives_notion_page_when_delete_sync_is_true(fake_
     assert "page-1" not in state
 
 
-def test_orphaned_state_entry_is_ignored_forever_when_delete_sync_is_false(fake_clients):
+def test_orphaned_state_entry_is_left_alone_and_reimported_when_delete_sync_is_false(fake_clients):
     """Given a state entry's Notion page has been deleted/archived and DELETE_SYNC is False,
-    sync_task_pages leaves the orphaned Google Task alone but records its id in _ignored_task_ids
-    so import_unlinked_gtasks never re-imports it."""
+    sync_task_pages leaves the orphaned Google Task alone and never blacklists it -- so the very
+    next pass imports it back into Notion. (Nothing is skipped permanently any more; the retired
+    _ignored_task_ids key is what used to make these orphans invisible forever.)"""
     sync.DELETE_SYNC = False
     fake_clients["gtasks"].add_task(DEFAULT_TASKLIST_ID, make_gtask("orphan-task", status="needsAction"))
     state = {"page-1": {"last_sync": "2026-01-01T00:00:00Z", "kind": "task", "task_id": "orphan-task", "tasklist_id": DEFAULT_TASKLIST_ID}}
 
     sync.sync_task_pages(state, [])  # page-1 no longer exists in Notion (not passed in, and not retrievable)
 
-    assert "orphan-task" in state.get("_ignored_task_ids", [])
+    assert "_ignored_task_ids" not in state
     assert "page-1" not in state
     assert "orphan-task" in fake_clients["gtasks"]._tasks[DEFAULT_TASKLIST_ID]  # left alone, not deleted
-    # Confirm it really is never re-imported on a later pass:
-    all_gtasks = sync.list_all_gtasks()
-    sync.import_unlinked_gtasks(state, all_gtasks, set())
-    assert len(fake_clients["notion"]._pages) == 0
+    [reimported] = [p for p in fake_clients["notion"]._pages.values() if sync.notion_gtask_id(p) == "orphan-task"]
+    assert reimported is not None
 
 
 def test_orphaned_state_entry_deletes_google_task_when_delete_sync_is_true(fake_clients):
@@ -183,14 +182,12 @@ def test_orphaned_state_entry_deletes_google_task_when_delete_sync_is_true(fake_
     assert "page-1" not in state
 
 
-def test_delete_sync_true_can_reimport_the_task_it_just_deleted(fake_clients):
-    """KNOWN QUIRK: sync_task_pages snapshots all_gtasks once at the top of the function (line 698),
-    before the orphaned-state cleanup loop runs. With DELETE_SYNC=True, cleanup deletes the orphaned
-    Google Task from the real API, but import_unlinked_gtasks (called afterward, still using that
-    stale snapshot) sees the task as if it still exists and needsAction, and recreates a Notion row
-    for it. Net effect: a task deleted via DELETE_SYNC=True can reappear in Notion on the very same
-    run. This test documents the behavior as-is; fixing it would mean re-fetching all_gtasks (or
-    removing the deleted id from it) after the cleanup loop."""
+def test_delete_sync_true_does_not_reimport_the_task_it_just_deleted(fake_clients):
+    """Regression test. sync_task_pages snapshots all_gtasks once at the top, before the cleanup
+    loop deletes orphaned Google Tasks -- so import_unlinked_gtasks, running afterward against that
+    stale snapshot, would see the deleted task as if it still existed and recreate a Notion row for
+    it. Now that nothing is skipped on status, that would resurrect every deletion on the same run,
+    so cleanup tracks the ids it deleted and passes them through as already-handled."""
     sync.DELETE_SYNC = True
     fake_clients["gtasks"].add_task(DEFAULT_TASKLIST_ID, make_gtask("orphan-task", title="Ghost task", status="needsAction"))
     state = {"page-1": {"last_sync": "2026-01-01T00:00:00Z", "kind": "task", "task_id": "orphan-task", "tasklist_id": DEFAULT_TASKLIST_ID}}
@@ -198,8 +195,7 @@ def test_delete_sync_true_can_reimport_the_task_it_just_deleted(fake_clients):
     sync.sync_task_pages(state, [])
 
     assert "orphan-task" not in fake_clients["gtasks"]._tasks[DEFAULT_TASKLIST_ID]  # really deleted on Google
-    reimported_pages = [p for p in fake_clients["notion"]._pages.values() if sync.notion_gtask_id(p) == "orphan-task"]
-    assert len(reimported_pages) == 1  # ...but reimported into Notion anyway
+    assert [p for p in fake_clients["notion"]._pages.values() if sync.notion_gtask_id(p) == "orphan-task"] == []
 
 
 # ---- Archived tasks (written by notion-task-archiver) -----------------------

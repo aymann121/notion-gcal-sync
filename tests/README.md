@@ -45,12 +45,19 @@ changed / both changed → "Notion wins" / neither changed) crossed with
 tasks vs. events and with `DELETE_SYNC` True/False. See
 `test_task_conflict_resolution.py` and `test_event_conflict_resolution.py`.
 
+`test_transient_errors_are_not_deletions.py` covers the destructive edge of
+that flag: with `DELETE_SYNC` on, a 500 or a rate-limit must fail the run
+rather than look like a deleted object. Because `sync.py`'s `is_not_found`
+type-checks the exception, the fakes raise the real SDK errors —
+`notion_not_found` / `google_not_found` in `fakes.py` — rather than a generic
+one.
+
 **Known limitation of `fakes.py`**: pagination isn't simulated (every list
-call returns everything in one page), and the fakes don't reproduce every
-real-API error shape — they raise a generic `NotFound` wherever `sync.py`
-only checks "did this raise at all." If you extend `sync.py` to depend on
-paginated responses or a specific exception type, extend `fakes.py`
-alongside it rather than reaching for `unittest.mock.MagicMock` mid-test.
+call returns everything in one page), and the fakes reproduce only the
+not-found error shape, not the full range of real API failures. If you extend
+`sync.py` to depend on paginated responses or another specific exception type,
+extend `fakes.py` alongside it rather than reaching for
+`unittest.mock.MagicMock` mid-test.
 
 ## Layer 3: `tests/e2e/`
 

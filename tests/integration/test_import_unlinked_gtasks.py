@@ -22,17 +22,19 @@ def test_unlinked_needs_action_task_is_imported_into_notion(fake_clients):
     assert state[page["id"]]["task_id"] == "gtask-1"
 
 
-def test_completed_unlinked_task_is_not_imported(fake_clients):
-    """Given a Google Task with no matching Notion page but status "completed", import_unlinked_gtasks
-    leaves it alone (old completed history should not flood into Notion, per CLAUDE.md)."""
+def test_completed_unlinked_task_is_imported_as_done(fake_clients):
+    """Given a Google Task with no matching Notion page and status "completed", import_unlinked_gtasks
+    imports it too, as a Done row -- nothing is skipped, so the two sides stay a complete mirror."""
     fake_clients["gtasks"].add_task(DEFAULT_TASKLIST_ID, make_gtask("gtask-1", title="Old and done", status="completed"))
     state = {}
     all_gtasks = sync.list_all_gtasks()
 
     sync.import_unlinked_gtasks(state, all_gtasks, linked_task_ids=set())
 
-    assert fake_clients["notion"]._pages == {}
-    assert state == {}
+    [page] = fake_clients["notion"]._pages.values()
+    assert sync.notion_title(page) == "Old and done"
+    assert sync.notion_status(page) == sync.STATUS_DONE
+    assert state[page["id"]]["task_id"] == "gtask-1"
 
 
 def test_already_linked_task_is_not_reimported(fake_clients):
@@ -47,16 +49,17 @@ def test_already_linked_task_is_not_reimported(fake_clients):
     assert fake_clients["notion"]._pages == {}
 
 
-def test_ignored_task_id_is_never_reimported(fake_clients):
-    """Given a Google Task id previously recorded in state["_ignored_task_ids"] (its Notion page was
-    deleted without DELETE_SYNC), import_unlinked_gtasks never recreates a Notion row for it."""
+def test_leftover_ignored_task_ids_state_key_no_longer_blocks_an_import(fake_clients):
+    """Given a state file still carrying the retired "_ignored_task_ids" key from an older run,
+    import_unlinked_gtasks pays no attention to it -- nothing is permanently skipped any more."""
     fake_clients["gtasks"].add_task(DEFAULT_TASKLIST_ID, make_gtask("gtask-1", status="needsAction"))
     state = {"_ignored_task_ids": ["gtask-1"]}
     all_gtasks = sync.list_all_gtasks()
 
     sync.import_unlinked_gtasks(state, all_gtasks, linked_task_ids=set())
 
-    assert fake_clients["notion"]._pages == {}
+    [page] = fake_clients["notion"]._pages.values()
+    assert sync.notion_gtask_id(page) == "gtask-1"
 
 
 def test_unlinked_task_in_non_default_list_gets_a_matching_course(fake_clients):

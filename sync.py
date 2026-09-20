@@ -10,16 +10,18 @@ Conflict rule: compare last_edited_time / updated vs last_sync;
 whichever side changed more recently wins. Both changed → Notion wins.
 
 Linked IDs live on the Notion page (Google Task ID / Google Event ID).
-Deletions are not mirrored unless DELETE_SYNC is True. See README.md.
+Deletions are mirrored both ways while DELETE_SYNC is True. See README.md.
 """
 
 import os
 import json
 import datetime
 from notion_client import Client as NotionClient
+from notion_client import APIErrorCode, APIResponseError
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 # ---- Config -----------------------------------------------------------------
 
@@ -45,8 +47,11 @@ STATUS_NOT_STARTED = "Not started"
 # overwritten *by* a completed Google Task (see resolve_notion_status).
 STATUS_ARCHIVED = "Archived"
 
-# If True, deleting on one side archives/deletes the other.
-DELETE_SYNC = False
+# Deleting on one side archives/deletes the other: a deleted Notion row deletes
+# its Google Task/event, and a deleted Google Task archives its Notion page.
+# Because "missing" now means "delete the counterpart", every lookup that can
+# report a thing as missing must be sure it really is (see is_not_found).
+DELETE_SYNC = True
 
 # Per-page last_sync (+ task/event ids) so we know which side changed.
 STATE_FILE = "sync_state.json"
@@ -69,6 +74,23 @@ def get_google_credentials():
 _creds = get_google_credentials()
 gcal = build("calendar", "v3", credentials=_creds)
 gtasks = build("tasks", "v1", credentials=_creds)
+
+# ---- Error handling ---------------------------------------------------------
+
+
+def is_not_found(exc):
+    """True only for a genuine 404/410 from Notion or Google.
+
+    Every "has this been deleted?" lookup goes through here. With DELETE_SYNC on,
+    a swallowed error is a deletion order, so a rate-limit or a 500 must raise and
+    fail the run rather than look like a missing object.
+    """
+    if isinstance(exc, HttpError):
+        return exc.resp.status in (404, 410)
+    if isinstance(exc, APIResponseError):
+        return exc.code == APIErrorCode.ObjectNotFound
+    return False
+
 
 # ---- State ------------------------------------------------------------------
 
@@ -396,7 +418,9 @@ def get_gcal_event(event_id):
         return gcal.events().get(
             calendarId=GOOGLE_CALENDAR_ID, eventId=event_id
         ).execute()
-    except Exception:
+    except Exception as exc:
+        if not is_not_found(exc):
+            raise
         return None
 
 
@@ -499,7 +523,9 @@ def due_from_gtasks(task):
 def get_gtask(tasklist_id, task_id):
     try:
         return gtasks.tasks().get(tasklist=tasklist_id, task=task_id).execute()
-    except Exception:
+    except Exception as exc:
+        if not is_not_found(exc):
+            raise
         return None
 
 
@@ -681,7 +707,9 @@ def sync_event_pages(state, event_pages):
         )
         try:
             page = notion.pages.retrieve(page_id=notion_page_id) if notion_page_id else None
-        except Exception:
+        except Exception as exc:
+            if not is_not_found(exc):
+                raise
             page = None
 
         if page is not None and not page.get("archived"):
@@ -823,7 +851,8 @@ def sync_task_pages(state, task_pages):
             "tasklist_id": list_id,
         }
 
-    # State entries whose Notion page is gone (no Google→Notion create for tasks)
+    # State entries whose Notion page is gone → delete the Google Task too
+    deleted_task_ids = set()
     for page_id, entry in list(state.items()):
         if not isinstance(entry, dict) or entry.get("kind") != "task":
             continue
@@ -832,37 +861,44 @@ def sync_task_pages(state, task_pages):
             continue
         try:
             page = notion.pages.retrieve(page_id=page_id)
-        except Exception:
+        except Exception as exc:
+            if not is_not_found(exc):
+                raise
             page = None
         if page is None or page.get("archived"):
             if DELETE_SYNC:
+                # The recorded list can be stale (or absent on an old entry); fall
+                # back to where the task actually is, or the task survives the
+                # delete and gets re-imported into Notion on the next run.
                 list_id = entry.get("tasklist_id")
+                if task_id in all_gtasks:
+                    list_id = all_gtasks[task_id][0]
                 if list_id:
                     try:
                         gtasks.tasks().delete(
                             tasklist=list_id, task=task_id
                         ).execute()
-                    except Exception:
-                        pass
-            else:
-                # Leave the orphaned Google task alone, but never re-import it.
-                ignored = set(state.get("_ignored_task_ids", []))
-                ignored.add(task_id)
-                state["_ignored_task_ids"] = sorted(ignored)
+                    except Exception as exc:
+                        if not is_not_found(exc):
+                            raise
+                    # all_gtasks is a snapshot from before the delete, so without
+                    # this the task would be re-imported as a brand-new Notion row.
+                    deleted_task_ids.add(task_id)
             state.pop(page_id, None)
 
-    import_unlinked_gtasks(state, all_gtasks, seen_task_ids)
+    import_unlinked_gtasks(state, all_gtasks, seen_task_ids | deleted_task_ids)
 
 
 def import_unlinked_gtasks(state, all_gtasks, linked_task_ids):
-    """Create Notion rows for active Google Tasks not yet linked to any page."""
-    ignored = set(state.get("_ignored_task_ids", []))
+    """Create Notion rows for every Google Task not yet linked to a page.
+
+    Nothing is skipped: completed tasks come in too (as Status = Done), so the
+    two sides stay a complete mirror of each other.
+    """
     default_list_id = get_default_tasklist_id()
 
     for task_id, (list_id, task) in all_gtasks.items():
-        if task_id in linked_task_ids or task_id in ignored:
-            continue
-        if task.get("status") != "needsAction":
+        if task_id in linked_task_ids:
             continue
 
         course_page_id = None

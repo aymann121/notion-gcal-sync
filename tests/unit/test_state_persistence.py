@@ -19,7 +19,7 @@ def test_save_state_then_load_state_round_trips(tmp_state_file):
     """Given a state dict is saved, loading it back returns an equal dict."""
     state = {
         "page-1": {"last_sync": "2026-01-01T00:00:00+00:00", "kind": "task", "task_id": "t1"},
-        "_ignored_task_ids": ["t2", "t3"],
+        "page-2": {"last_sync": "2026-01-02T00:00:00+00:00", "kind": "event", "event_id": "e1"},
     }
     sync.save_state(state)
     assert sync.load_state() == state

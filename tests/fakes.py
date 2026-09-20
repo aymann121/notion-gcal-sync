@@ -12,11 +12,34 @@ falsy) since no current test needs multi-page behavior.
 
 import itertools
 
+import httpx
+from googleapiclient.errors import HttpError
+from notion_client import APIErrorCode, APIResponseError
 
-class NotFound(Exception):
-    """Stands in for whatever the real SDKs raise on a 404; sync.py's
-    `get_gcal_event`/`get_gtask`/page-retrieve-in-a-try-block callers only
-    care that *some* exception is raised, not its type."""
+
+class _FakeStatus:
+    """Minimal stand-in for an httplib2 response object (HttpError reads .status)."""
+
+    def __init__(self, status):
+        self.status = status
+        self.reason = "Not Found"
+
+
+def notion_not_found(message):
+    """The exception notion_client raises for a missing page/database.
+
+    sync.py's `is_not_found` type-checks these, because with DELETE_SYNC on a
+    swallowed error is a deletion order -- so the fakes have to raise the real
+    SDK exceptions rather than a generic one.
+    """
+    return APIResponseError(
+        httpx.Response(404), message, APIErrorCode.ObjectNotFound
+    )
+
+
+def google_not_found(message):
+    """The exception googleapiclient raises for a missing event/task/list."""
+    return HttpError(_FakeStatus(404), message.encode())
 
 
 class _Call:
@@ -70,7 +93,7 @@ class FakeNotionClient:
         """Wire up the two-hop schema lookup get_courses_database_id/ensure_course
         depend on: the main database's Course relation property, and the Courses
         database's title property. Without this, any code path that creates a
-        new Course page (e.g. import_unlinked_gtasks) raises NotFound."""
+        new Course page (e.g. import_unlinked_gtasks) raises a not-found error."""
         self.register_data_source(
             main_database_id,
             {"Course": {"type": "relation", "relation": {"database_id": courses_database_id}}},
@@ -123,7 +146,7 @@ class _FakeNotionPages:
     def retrieve(self, page_id):
         page = self._client._pages.get(page_id)
         if page is None:
-            raise NotFound(f"no such page {page_id}")
+            raise notion_not_found(f"no such page {page_id}")
         return page
 
     def create(self, parent, properties):
@@ -161,15 +184,15 @@ class _FakeNotionRawClient:
             database_id = path.split("/", 1)[1]
             ds_id = self._client._data_sources.get(database_id)
             if ds_id is None:
-                raise NotFound(f"no data source registered for {database_id}")
+                raise notion_not_found(f"no data source registered for {database_id}")
             return _FakeHttpResponse({"data_sources": [{"id": ds_id}]})
         if path.startswith("data_sources/"):
             ds_id = path.split("/", 1)[1]
             properties = self._client._data_sources.get(ds_id)
             if properties is None:
-                raise NotFound(f"no such data source {ds_id}")
+                raise notion_not_found(f"no such data source {ds_id}")
             return _FakeHttpResponse({"properties": properties})
-        raise NotFound(f"unhandled path {path}")
+        raise notion_not_found(f"unhandled path {path}")
 
 
 # ---- Google Calendar ------------------------------------------------------
@@ -198,7 +221,7 @@ class _FakeGCalEvents:
         def fn():
             event = self._client._events.get(eventId)
             if event is None:
-                raise NotFound(f"no such event {eventId}")
+                raise google_not_found(f"no such event {eventId}")
             return event
 
         return _Call(fn)
@@ -282,7 +305,7 @@ class _FakeGTaskLists:
             list_id = DEFAULT_TASKLIST_ID if tasklist == "@default" else tasklist
             tl = self._client._tasklists.get(list_id)
             if tl is None:
-                raise NotFound(f"no such tasklist {tasklist}")
+                raise google_not_found(f"no such tasklist {tasklist}")
             return tl
 
         return _Call(fn)
@@ -312,7 +335,7 @@ class _FakeGTasks:
         def fn():
             t = self._client._tasks.get(tasklist, {}).get(task)
             if t is None:
-                raise NotFound(f"no such task {task} in {tasklist}")
+                raise google_not_found(f"no such task {task} in {tasklist}")
             return t
 
         return _Call(fn)
