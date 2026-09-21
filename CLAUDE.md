@@ -9,7 +9,7 @@ A single-file Python script (`sync.py`) that two-way syncs a Notion "Tasks Track
 - `Task` (or empty) → Google Tasks — title, due date, Status ↔ completion, Course relation → task list
 - `Event` → Google Calendar — title + due date as an all-day event (both directions)
 
-It runs on a schedule via GitHub Actions (`.github/workflows/sync.yml`, cron `0 13,18,22,4 * * *` — four times a day, 9am/2pm/6pm/12am ET — plus manual `workflow_dispatch`), committing its own state file back to the repo after each run.
+It runs on a schedule via GitHub Actions (`.github/workflows/sync.yml`, cron `0 14,18,20,0 * * *` — four times a day, 10am/2pm/4pm/8pm ET — plus manual `workflow_dispatch`), committing its own state file back to the repo after each run.
 
 A companion repo, `notion-task-radar`, writes `Status = Archived` onto Radar-course tasks that ended their day unfinished. This script treats `Archived` as terminal and completes the matching Google Task — see "Archived tasks" below.
 

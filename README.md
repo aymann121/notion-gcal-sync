@@ -2,7 +2,7 @@
 
 Keeps your **Tasks Tracker** database in sync with **Google Tasks** and
 **Google Calendar**, routed by the `Sync As` property. Runs free on GitHub
-Actions four times a day (9am/2pm/6pm/12am ET).
+Actions four times a day (10am/2pm/4pm/8pm ET).
 
 | `Sync As` | Destination | What syncs |
 |-----------|-------------|------------|
