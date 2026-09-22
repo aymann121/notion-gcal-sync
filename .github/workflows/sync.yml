@@ -2,10 +2,10 @@ name: Notion <-> Google Tasks + Calendar Sync
 
 on:
   schedule:
-    # 10am/2pm/4pm/8pm US Eastern (fixed at UTC-4 / EDT). Cron is always UTC
+    # Hourly, 9am-11pm US Eastern (fixed at UTC-4 / EDT). Cron is always UTC
     # and doesn't shift for DST, so during EST (~Nov-Mar) these run 1 hour
-    # later than intended local time (11am/3pm/5pm/9pm).
-    - cron: "0 14,18,20,0 * * *"
+    # later than intended local time (10am-12am).
+    - cron: "0 13-23,0-3 * * *"
   workflow_dispatch: {}       # lets you trigger it manually from the Actions tab
 
 permissions:
