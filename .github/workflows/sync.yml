@@ -1,11 +1,16 @@
 name: Notion <-> Google Tasks + Calendar Sync
 
 on:
+  # Near-real-time path: relay/worker.js forwards Notion webhooks and Google
+  # Calendar push notifications here. Google Tasks has no push API, so its
+  # edits only arrive via the fallback cron below.
+  repository_dispatch:
+    types: [notion-change, gcal-change]
   schedule:
-    # Hourly, 9am-11pm US Eastern (fixed at UTC-4 / EDT). Cron is always UTC
-    # and doesn't shift for DST, so during EST (~Nov-Mar) these run 1 hour
-    # later than intended local time (10am-12am).
-    - cron: "0 13-23,0-3 * * *"
+    # Fallback: every 3 hours, 9am-9pm US Eastern (fixed at UTC-4 / EDT). Cron
+    # is always UTC and doesn't shift for DST, so during EST (~Nov-Mar) these
+    # run 1 hour later than intended local time.
+    - cron: "0 13,16,19,22,1 * * *"
   workflow_dispatch: {}       # lets you trigger it manually from the Actions tab
 
 permissions:

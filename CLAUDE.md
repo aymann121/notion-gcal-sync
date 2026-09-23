@@ -9,7 +9,18 @@ A single-file Python script (`sync.py`) that two-way syncs a Notion "Tasks Track
 - `Task` (or empty) → Google Tasks — title, due date, Status ↔ completion, Course relation → task list
 - `Event` → Google Calendar — title + due date as an all-day event (both directions)
 
-It runs on a schedule via GitHub Actions (`.github/workflows/sync.yml`, cron `0 14,18,20,0 * * *` — four times a day, 10am/2pm/4pm/8pm ET — plus manual `workflow_dispatch`), committing its own state file back to the repo after each run.
+It runs via GitHub Actions (`.github/workflows/sync.yml`), triggered three ways:
+
+- **`repository_dispatch`** (`notion-change` / `gcal-change`), sent by the webhook relay in `relay/` (a Cloudflare Worker). The relay forwards Notion integration webhooks and Google Calendar push notifications, so edits on either side sync within a minute or two.
+- **Fallback cron** `0 13,16,19,22,1 * * *`, every 3 hours from 9am to 9pm ET. Google Tasks has **no push API**, so edits made in Google Tasks only sync on this cron. It also catches any webhooks that were missed.
+- **Manual** `workflow_dispatch`.
+
+Every run is the same full pass, and each one commits its state file back to the repo. The `concurrency: sync` group allows one running job and one pending job, which acts as the debounce for bursts of webhooks.
+
+Two details about the triggers:
+
+- The relay drops Notion events authored only by this integration's own bot (`NOTION_BOT_ID`), so the sync's own writes don't trigger another sync. Calendar notifications can't be filtered by author, so each sync that writes to Calendar costs one extra run that changes nothing.
+- Calendar push channels expire, so `.github/workflows/gcal-watch.yml` re-registers one every 5 days via `watch_gcal.py`. Setup steps are in `relay/README.md`.
 
 A companion repo, `notion-task-radar`, writes `Status = Archived` onto Radar-course tasks that ended their day unfinished. This script treats `Archived` as terminal and completes the matching Google Task — see "Archived tasks" below.
 
@@ -34,6 +45,7 @@ pytest -m e2e tests/e2e -v    # needs E2E_ENABLE=1 and disposable resources
 - `NOTION_TOKEN`, `NOTION_DATABASE_ID`
 - `GOOGLE_TOKEN_JSON` — full contents of `token.json`
 - `GOOGLE_CALENDAR_ID` — optional, defaults to `primary`
+- `RELAY_URL`, `GCAL_CHANNEL_TOKEN` — only for `watch_gcal.py`
 
 In GitHub Actions these come from repo secrets; locally, export them in your shell before running `sync.py`.
 
