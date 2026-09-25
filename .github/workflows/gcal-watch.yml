@@ -2,8 +2,10 @@ name: Renew Google Calendar push channel
 
 on:
   schedule:
-    # Every 5 days; watch_gcal.py opens 7-day channels, so one never lapses.
-    - cron: "0 12 */5 * *"
+    # Every 2 days; watch_gcal.py opens 7-day channels, so a channel survives
+    # even if GitHub drops two scheduled runs in a row. Off-minute for the
+    # same reason as sync.yml.
+    - cron: "23 12 */2 * *"
   workflow_dispatch: {}
 
 jobs:

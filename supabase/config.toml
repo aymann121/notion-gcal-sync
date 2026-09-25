@@ -1,0 +1,6 @@
+project_id = "nwdulegrvumwcygvohhd"
+
+# Notion and Google can't send a Supabase JWT; the relay authenticates each
+# request itself (Notion HMAC signature, Google channel token).
+[functions.relay]
+verify_jwt = false

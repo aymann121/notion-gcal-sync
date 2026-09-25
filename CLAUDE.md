@@ -11,8 +11,8 @@ A single-file Python script (`sync.py`) that two-way syncs a Notion "Tasks Track
 
 It runs via GitHub Actions (`.github/workflows/sync.yml`), triggered three ways:
 
-- **`repository_dispatch`** (`notion-change` / `gcal-change`), sent by the webhook relay in `relay/` (a Cloudflare Worker). The relay forwards Notion integration webhooks and Google Calendar push notifications, so edits on either side sync within a minute or two.
-- **Fallback cron** `0 13,16,19,22,1 * * *`, every 3 hours from 9am to 9pm ET. Google Tasks has **no push API**, so edits made in Google Tasks only sync on this cron. It also catches any webhooks that were missed.
+- **`repository_dispatch`** (`notion-change` / `gcal-change`), sent by the webhook relay in `supabase/functions/relay` (a Supabase Edge Function). The relay forwards Notion integration webhooks and Google Calendar push notifications, so edits on either side sync within a minute or two.
+- **Fallback cron** `17 13-23,0-3 * * *`, hourly from 9am to 11pm ET. It runs at :17 rather than :00 because GitHub's `schedule` is best-effort and drops many runs at the top of the hour. Google Tasks has **no push API**, so edits made in Google Tasks only sync on this cron. It also catches any webhooks that were missed.
 - **Manual** `workflow_dispatch`.
 
 Every run is the same full pass, and each one commits its state file back to the repo. The `concurrency: sync` group allows one running job and one pending job, which acts as the debounce for bursts of webhooks.
@@ -20,7 +20,8 @@ Every run is the same full pass, and each one commits its state file back to the
 Two details about the triggers:
 
 - The relay drops Notion events authored only by this integration's own bot (`NOTION_BOT_ID`), so the sync's own writes don't trigger another sync. Calendar notifications can't be filtered by author, so each sync that writes to Calendar costs one extra run that changes nothing.
-- Calendar push channels expire, so `.github/workflows/gcal-watch.yml` re-registers one every 5 days via `watch_gcal.py`. Setup steps are in `relay/README.md`.
+- Calendar push channels expire, so `.github/workflows/gcal-watch.yml` re-registers one every 2 days via `watch_gcal.py` (channels last 7, so a couple of dropped scheduled runs are harmless). Setup steps are in `supabase/functions/relay/README.md`.
+- The relay's Supabase project is on the free plan, which pauses after ~7 days without *database* activity. Each `sync.yml` run calls the `public.keepalive()` RPC to prevent that. Don't remove that step.
 
 A companion repo, `notion-task-radar`, writes `Status = Archived` onto Radar-course tasks that ended their day unfinished. This script treats `Archived` as terminal and completes the matching Google Task — see "Archived tasks" below.
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Register a Google Calendar push channel that pings the relay Worker
-(relay/worker.js) whenever an event on GOOGLE_CALENDAR_ID changes.
+(supabase/functions/relay) whenever an event on GOOGLE_CALENDAR_ID changes.
 
 Channels expire, so .github/workflows/gcal-watch.yml re-runs this every few
 days. Old channels are left to expire on their own: while two overlap, each
@@ -15,7 +15,7 @@ import uuid
 
 import sync
 
-# Renewed every 5 days by gcal-watch.yml, so a 7-day channel never lapses.
+# Renewed every 2 days by gcal-watch.yml, so a 7-day channel never lapses.
 CHANNEL_TTL_SECONDS = 7 * 24 * 3600
 
 

@@ -2,21 +2,29 @@
 // repository_dispatch, which runs .github/workflows/sync.yml.
 //
 // Neither Notion nor Google can call GitHub's API directly (wrong body, no
-// auth header), so this Worker verifies each notification and forwards it.
-// It keeps no state: sync.yml's `concurrency: sync` group already collapses a
-// burst of dispatches into one running + one pending run.
+// auth header), so this Edge Function verifies each notification and forwards
+// it. It keeps no state: sync.yml's `concurrency: sync` group already collapses
+// a burst of dispatches into one running + one pending run.
+//
+// Deployed with verify_jwt = false (supabase/config.toml): Notion and Google
+// can't send a Supabase JWT, so the HMAC / channel-token checks below are the
+// authentication.
 
-export default {
-  async fetch(request, env, ctx) {
-    if (request.method !== "POST") return new Response("ok");
-    const { pathname } = new URL(request.url);
-    if (pathname === "/notion") return handleNotion(request, env, ctx);
-    if (pathname === "/gcal") return handleGcal(request, env, ctx);
-    return new Response("not found", { status: 404 });
-  },
-};
+// Supabase runtime global: keeps the dispatch running after the response.
+declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void };
 
-async function handleNotion(request, env, ctx) {
+const env = (name: string) => Deno.env.get(name) ?? "";
+
+Deno.serve((request) => {
+  if (request.method !== "POST") return new Response("ok");
+  // Supabase passes the path with the function name, e.g. /relay/notion.
+  const { pathname } = new URL(request.url);
+  if (pathname.endsWith("/notion")) return handleNotion(request);
+  if (pathname.endsWith("/gcal")) return handleGcal(request);
+  return new Response("not found", { status: 404 });
+});
+
+async function handleNotion(request: Request): Promise<Response> {
   const raw = await request.text();
   let body;
   try {
@@ -33,10 +41,11 @@ async function handleNotion(request, env, ctx) {
     return new Response("ok");
   }
 
-  if (!env.NOTION_VERIFICATION_TOKEN) {
+  const verificationToken = env("NOTION_VERIFICATION_TOKEN");
+  if (!verificationToken) {
     return new Response("verification token not configured", { status: 503 });
   }
-  const expected = "sha256=" + (await hmacHex(env.NOTION_VERIFICATION_TOKEN, raw));
+  const expected = "sha256=" + (await hmacHex(verificationToken, raw));
   const given = request.headers.get("X-Notion-Signature") || "";
   if (!safeEqual(given, expected)) {
     return new Response("bad signature", { status: 401 });
@@ -45,38 +54,40 @@ async function handleNotion(request, env, ctx) {
   // sync.py's own writes (linking ids, mirroring Google edits) come back as
   // webhooks authored by this integration's bot. Dropping them keeps each
   // sync from triggering another, no-op sync.
-  const authors = body.authors || [];
+  const botId = env("NOTION_BOT_ID");
+  const authors: { id?: string }[] = body.authors || [];
   if (
-    env.NOTION_BOT_ID &&
+    botId &&
     authors.length > 0 &&
-    authors.every((a) => normalizeId(a.id) === normalizeId(env.NOTION_BOT_ID))
+    authors.every((a) => normalizeId(a.id) === normalizeId(botId))
   ) {
     return new Response("ignored: own write");
   }
 
-  ctx.waitUntil(dispatch(env, "notion-change", body.type));
+  EdgeRuntime.waitUntil(dispatch("notion-change", body.type));
   return new Response("ok");
 }
 
-async function handleGcal(request, env, ctx) {
-  if (request.headers.get("X-Goog-Channel-Token") !== env.GCAL_CHANNEL_TOKEN) {
+function handleGcal(request: Request): Response {
+  const channelToken = env("GCAL_CHANNEL_TOKEN");
+  if (!channelToken || request.headers.get("X-Goog-Channel-Token") !== channelToken) {
     return new Response("bad token", { status: 401 });
   }
   // "sync" is the handshake Google sends when a channel is created.
   const state = request.headers.get("X-Goog-Resource-State");
   if (state === "sync") return new Response("ok");
 
-  ctx.waitUntil(dispatch(env, "gcal-change", state));
+  EdgeRuntime.waitUntil(dispatch("gcal-change", state));
   return new Response("ok");
 }
 
-async function dispatch(env, eventType, detail) {
+async function dispatch(eventType: string, detail: string | null) {
   const res = await fetch(
-    `https://api.github.com/repos/${env.GITHUB_REPO}/dispatches`,
+    `https://api.github.com/repos/${env("GITHUB_REPO")}/dispatches`,
     {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+        Authorization: `Bearer ${env("GITHUB_TOKEN")}`,
         Accept: "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "notion-gcal-sync-relay",
@@ -85,7 +96,7 @@ async function dispatch(env, eventType, detail) {
         event_type: eventType,
         client_payload: { detail: detail || null },
       }),
-    }
+    },
   );
   if (!res.ok) {
     console.error(`dispatch ${eventType} failed: ${res.status} ${await res.text()}`);
@@ -94,26 +105,26 @@ async function dispatch(env, eventType, detail) {
   }
 }
 
-async function hmacHex(key, message) {
+async function hmacHex(key: string, message: string): Promise<string> {
   const enc = new TextEncoder();
   const cryptoKey = await crypto.subtle.importKey(
     "raw",
     enc.encode(key),
     { name: "HMAC", hash: "SHA-256" },
     false,
-    ["sign"]
+    ["sign"],
   );
   const sig = await crypto.subtle.sign("HMAC", cryptoKey, enc.encode(message));
   return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-function safeEqual(a, b) {
+function safeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
   let diff = 0;
   for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return diff === 0;
 }
 
-function normalizeId(id) {
+function normalizeId(id: string | undefined): string {
   return (id || "").replace(/-/g, "").toLowerCase();
 }
