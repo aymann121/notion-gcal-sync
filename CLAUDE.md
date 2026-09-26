@@ -4,101 +4,143 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A single-file Python script (`sync.py`) that two-way syncs a Notion "Tasks Tracker" database with Google Tasks and Google Calendar, routed by a Notion `Sync As` select property:
+A two-way sync between a Notion "Tasks Tracker" database and Google Tasks + Google Calendar. It runs entirely on Supabase (project `nwdulegrvumwcygvohhd`, free plan): Edge Functions in Deno/TypeScript, with state in Postgres. Rows are routed by the Notion `Sync As` select property:
 
-- `Task` (or empty) → Google Tasks — title, due date, Status ↔ completion, Course relation → task list
-- `Event` → Google Calendar — title + due date as an all-day event (both directions)
+- `Task` (or empty) → Google Tasks: title, due date, Status ↔ completion, and Course relation → task list.
+- `Event` → Google Calendar: title + due date as an all-day event, both directions.
 
-It runs via GitHub Actions (`.github/workflows/sync.yml`), triggered three ways:
+**Migration in progress.** The original Python / GitHub Actions version lives in `cron (deprecated)/` and stays live until the cutover. `cron (deprecated)/README.md` has the runbook. Until then, `sync_control.enabled` is `false` and every function here no-ops, while the relay still forwards webhooks to GitHub (`FORWARD_TO_GITHUB`). Never have both sides live at once: they keep separate state, so both would create links for the same new row, which duplicates tasks.
 
-- **`repository_dispatch`** (`notion-change` / `gcal-change`), sent by the webhook relay in `supabase/functions/relay` (a Supabase Edge Function). The relay forwards Notion integration webhooks and Google Calendar push notifications, so edits on either side sync within a minute or two.
-- **Fallback cron** `17 13-23,0-3 * * *`, hourly from 9am to 11pm ET. It runs at :17 rather than :00 because GitHub's `schedule` is best-effort and drops many runs at the top of the hour. Google Tasks has **no push API**, so edits made in Google Tasks only sync on this cron. It also catches any webhooks that were missed.
-- **Manual** `workflow_dispatch`.
+## How it runs
 
-Every run is the same full pass, and each one commits its state file back to the repo. The `concurrency: sync` group allows one running job and one pending job, which acts as the debounce for bursts of webhooks.
+```
+Notion webhook ────────┐
+GCal push ─────────────┴─► relay ───────────────┐
+pg_cron */10 * * * * ──► poll-gtasks ─(change)──┼─► sync ─► one pass (sync_core.ts)
+pg_cron 17 9 * * * (daily) ─────────────────────┘      state: sync_state, sync_control
+pg_cron every 2 days ─► watch-gcal (renews the Calendar push channel → relay/gcal)
+```
 
-Two details about the triggers:
+- **`functions/relay`** checks the Notion HMAC signature and the Calendar channel token, then POSTs to `sync`.
+  - It drops Notion events authored only by the integration's own bot (`NOTION_BOT_ID`), so the sync's own writes don't trigger another sync.
+  - Calendar notifications can't be filtered by author, so a pass that writes to Calendar costs one extra no-op pass.
+- **`functions/sync`** marks the sync dirty, answers `202`, and drains the dirty flag in the background (`EdgeRuntime.waitUntil`). `POST ?dry_run=1` instead runs one pass synchronously with writes logged and skipped, saves nothing, and works while disabled.
+- **`functions/poll-gtasks`**: Google Tasks has **no push API**, so this is the cheap poller. Every 10 minutes it compares a signature of all task lists (`id:title`), then asks each list for `updatedMin=<cursor>&maxResults=1` (with deleted, hidden and completed tasks included). It calls `sync` only if something changed. It also restarts leftover work (`dirty` set with the lease free), backing off 10 minutes after a failed pass.
+- **`functions/watch-gcal`** opens a 7-day Calendar push channel to `relay/gcal`. pg_cron renews it every 2 days.
+- **pg_cron** jobs (`migrations/*_cron_jobs.sql`) call the functions through `public.invoke_sync_function`, which reads `project_url` and `cron_secret` from Vault.
 
-- The relay drops Notion events authored only by this integration's own bot (`NOTION_BOT_ID`), so the sync's own writes don't trigger another sync. Calendar notifications can't be filtered by author, so each sync that writes to Calendar costs one extra run that changes nothing.
-- Calendar push channels expire, so `.github/workflows/gcal-watch.yml` re-registers one every 2 days via `watch_gcal.py` (channels last 7, so a couple of dropped scheduled runs are harmless). Setup steps are in `supabase/functions/relay/README.md`.
-- The relay's Supabase project is on the free plan, which pauses after ~7 days without *database* activity. Each `sync.yml` run calls the `public.keepalive()` RPC to prevent that. Don't remove that step.
+### Concurrency: lease + dirty flag
 
-A companion repo, `notion-task-radar`, writes `Status = Archived` onto Radar-course tasks that ended their day unfinished. This script treats `Archived` as terminal and completes the matching Google Task — see "Archived tasks" below.
+`sync_control` is a single row. The functions reach it only through RPCs (`migrations/*_sync_tables.sql`, callable by `service_role` alone). PostgREST pools its connections, so a session advisory lock isn't reliable; a lease row is used instead:
+
+1. Every trigger calls `mark_dirty()`.
+2. `claim_sync_lease(160)` succeeds only if `enabled` is true and nobody holds the lease, and it clears `dirty`.
+3. After the pass, `release_sync_lease(error)` returns `dirty` in the same statement. If a webhook arrived mid-pass, the holder loops, up to `MAX_PASSES = 3`, with the poller picking up anything left.
+4. A failed pass re-marks `dirty`.
+
+The result is "one running + one pending", like the old GitHub `concurrency` group. The lease TTL outlives the 150 s wall-clock limit, so a dead pass frees it.
+
+### State
+
+`sync_state` has one row per linked Notion page. `load_sync_state()` and `save_sync_state(state, cursor)` use exactly the old `sync_state.json` shape, `{page_id: {last_sync, kind, task_id?, tasklist_id?, event_id?}}`. That makes the one-time import `select save_sync_state('<file>'::jsonb)`.
+
+Two rules for how a pass handles state:
+
+- **Only a successful pass saves.** The save replaces the whole table in one transaction, so a pass that fails part-way persists nothing.
+- **The poller's cursor comes from the pass.** `runSyncPass` returns its start time, which becomes `gtasks_cursor`. The pass's own Google Tasks writes land after that time, so each writing pass costs one extra no-op pass.
 
 ## Commands
 
 ```bash
-pip install -r requirements.txt   # deps: notion-client, google-api-python-client, google-auth(-oauthlib)
-python get_google_token.py        # one-time, locally only: OAuth flow, produces token.json
-python sync.py                    # run one full sync pass
+cd supabase
+deno task test     # Deno test suite (functions/_shared/tests), in-memory fakes
+deno task check    # type-check every function and test
+supabase db push                       # apply migrations
+supabase functions deploy <name>       # sync | poll-gtasks | watch-gcal | relay
+supabase secrets set NAME=value
 ```
 
-There is no linter or build step in this repo — it's a script run directly. There *is* a three-layer test suite (`tests/unit`, `tests/integration` against `tests/fakes.py`, and an opt-in `tests/e2e`); see `tests/README.md`.
+There's no linter or build step. The legacy Python suite is still run from `cron (deprecated)/` with `pytest`.
 
-```bash
-pip install -r requirements.txt -r requirements-dev.txt
-pytest                        # unit + integration; e2e excluded by pytest.ini
-pytest -m e2e tests/e2e -v    # needs E2E_ENABLE=1 and disposable resources
-```
+### Secrets (Edge Functions)
 
-### Required environment variables (for `sync.py`)
+- `NOTION_TOKEN`, `NOTION_DATABASE_ID`.
+- `GOOGLE_TOKEN_JSON`: the full `token.json` produced once, locally, by `cron (deprecated)/get_google_token.py`. The functions trade its refresh token for an access token on every pass.
+- `GOOGLE_CALENDAR_ID`: optional, defaults to `primary`.
+- `CRON_SECRET`: the `x-cron-secret` header for `sync`, `poll-gtasks` and `watch-gcal`. It's also stored in Vault as `cron_secret`, next to `project_url`.
+- Relay:
+  - `NOTION_VERIFICATION_TOKEN`: from the Notion subscription handshake. It's printed to the relay's logs, then pasted into Notion.
+  - `NOTION_BOT_ID`: the integration's bot user id.
+  - `GCAL_CHANNEL_TOKEN`.
+  - `GITHUB_TOKEN`, `GITHUB_REPO` and `FORWARD_TO_GITHUB`: migration only.
+- `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are injected by Supabase automatically.
 
-- `NOTION_TOKEN`, `NOTION_DATABASE_ID`
-- `GOOGLE_TOKEN_JSON` — full contents of `token.json`
-- `GOOGLE_CALENDAR_ID` — optional, defaults to `primary`
-- `RELAY_URL`, `GCAL_CHANNEL_TOKEN` — only for `watch_gcal.py`
+All four functions are deployed with `verify_jwt = false` (`config.toml`), because their callers can't send a Supabase JWT. The relay authenticates each request with the HMAC signature and the channel token; the other three use `CRON_SECRET`.
 
-In GitHub Actions these come from repo secrets; locally, export them in your shell before running `sync.py`.
+The Notion webhook subscription points at `<project>/functions/v1/relay/notion`, with the events `page.created`, `page.properties_updated`, `page.deleted` and `page.undeleted`.
 
-## Architecture
+## Code layout
 
-Everything lives in `sync.py`, organized top-to-bottom as:
-
-1. **Config constants** — `PROP_*` map to exact Notion property names (title/date/status/relation/select/rich_text). If a Notion property is renamed, update the constant here — nothing else needs to change.
-2. **State** (`sync_state.json`) — a `{notion_page_id: {last_sync, kind, ...}}` map, the source of truth for "what changed since last run." It's the *only* persisted state; there's no database. In CI it round-trips via `actions/cache` and is committed back to `main` after each run (see workflow retry/rebase loop below).
-3. **Notion helpers** — thin wrappers over `notion_client` for reading/writing specific properties (`notion_title`, `notion_due_date`, `set_notion_status`, etc.).
-4. **Google Calendar helpers** and **Google Tasks helpers** — thin wrappers over the `googleapiclient` discovery API (`gcal`, `gtasks` clients built once at module load from `GOOGLE_TOKEN_JSON`).
-5. **Core sync logic** — `sync_event_pages` and `sync_task_pages`, each called once per run from `sync()`.
+- **`functions/_shared/sync_core.ts`**: the sync logic, a section-for-section port of `cron (deprecated)/sync.py`.
+  - Each section opens with a `// ==== <name> ====` banner and is ordered so it only uses the sections above it: Config → Per-pass context → General utilities → State → Notion reading / writing / Courses → Google Calendar → Google Tasks → Status mapping → Core sync: Events → Core sync: Tasks → Entry point (`runSyncPass`).
+  - Keep new code in the matching section.
+  - All caches live on the per-pass `SyncContext`, never in module globals. Edge isolates are reused across requests, so a module-level cache would leak between passes.
+- **`functions/_shared/clients.ts`**: plain `fetch` clients behind the `NotionApi`, `GCalApi` and `GTasksApi` interfaces.
+  - Every non-2xx response throws `ApiError`.
+  - Retries cover 429s, plus 5xx on non-POST calls. A POST that 500s may have created its object, so it isn't retried.
+  - `dryRunClients` wraps real clients for `?dry_run=1`.
+  - Notion is pinned to `Notion-Version: 2026-03-11`. That means rows are queried through `data_sources/{id}/query`, pages are created under a `data_source_id` parent, and trashing uses `in_trash`, since `archived` was removed in that version.
+- **`functions/_shared/db.ts`**: the RPC wrappers.
+- **`functions/_shared/gtasks_poll.ts`**: the poller's change detection.
+- **`functions/_shared/auth.ts`**: the `x-cron-secret` check, function-to-function calls, and `runInBackground`.
+- **`functions/_shared/tests/`**: `fakes.ts`, a port of the Python fakes whose not-found errors are real `ApiError`s, plus `*_test.ts`.
 
 ### Conflict resolution
 
-For every linked pair, compare `last_edited_time` (Notion) vs `updated` (Google) against `last_sync` in the state file:
+For every linked pair, compare Notion's `last_edited_time` and Google's `updated` against `last_sync`:
 
-- Only one side changed since `last_sync` → the other side is updated to match.
-- Both changed → **Notion wins** (this is a hardcoded branch in each sync function, not a config flag).
-- Neither side has a link yet → a new object is created on the other side and the id is written back onto the Notion page (`Google Event ID` / `Google Task ID` rich_text properties).
+- If only one side changed, the other side is updated to match.
+- If both changed, **Notion wins**. This is a hardcoded branch, not a config flag.
+- If a row isn't linked yet, a new object is created on the other side, and its id is written back onto the Notion page (`Google Event ID` / `Google Task ID`).
 
 ### Archived tasks
 
-`notion-task-radar` writes `Status = Archived` at 1am on Radar-course tasks that ended their day unfinished. Here, `Archived` is terminal like `Done`:
+A companion repo, `notion-task-radar`, writes `Status = Archived` at 1am on Radar-course tasks that ended their day unfinished. Here, `Archived` is terminal like `Done`:
 
-- `status_to_gtasks` maps both `Done` and `Archived` → `completed`.
-- A page that is already `Archived` when it first syncs is **created then completed** — `create_gtask` carries the status, and a follow-up `update_gtask` patch is what reliably stamps Google's `completed` field so it lands in the Completed list rather than looking like outstanding work.
+- `statusToGtasks` maps both to `completed`.
+- A page that is already `Archived` when it first syncs is created, then completed with a follow-up patch. That patch is what reliably stamps Google's `completed` field.
 
-The subtle part is the direction *back*. Completing the task bumps Google's `updated`, so the next run reaches the `google_changed and not notion_changed` branch, and the naive mapping (`completed` → `Done`) would silently rewrite every task you *missed* as one you *finished*, emptying the Archived view a run later. `resolve_notion_status` guards this: a completed Google task leaves an `Archived` page alone, because the sync itself is what completed it. `test_completed_google_task_never_rewrites_archived_as_done` is the regression test — it only fails on the *second* sync pass, so a single-run test wouldn't catch it.
+The subtle part is the direction back:
 
-Un-ticking the Google task still revives the page (`Archived` + `needsAction` → `Not started`), so an accidental archive is recoverable from either side.
+- Completing the task bumps Google's `updated`, so the next pass takes the "Google changed" branch.
+- There, a naive `completed` → `Done` mapping would silently rewrite every *missed* task as *finished*. `resolveNotionStatus` guards against this by leaving an `Archived` row alone when the Google task is completed.
+- The regression test is `pass_test.ts` "Archived stays Archived across two passes". It only fails on the second pass.
+- Un-ticking the Google task still revives the row (`Archived` + `needsAction` → `Not started`).
 
 ### Reverse-linking quirks
 
-- **Tasks**: since Google Tasks has no field to store a Notion page id, matching a Google Task back to a Notion page relies on the `Google Task ID` rich_text property written onto the Notion page. Any Google Task not yet linked to a page is treated as "created directly in Google Tasks" and imported into Notion by `import_unlinked_gtasks` (called at the end of `sync_task_pages`). Nothing is filtered out: completed tasks are imported too, as `Status = Done`, so the two sides stay a complete mirror. There is no skip list — an earlier `_ignored_task_ids` key in the state file blacklisted orphans forever and is gone; deletions are now mirrored instead (below).
-- **Events**: Calendar events created by this script are tagged with a private extended property `notion_page_id`, which lets a deleted Notion row be recreated from the Calendar side (`sync_event_pages`'s second loop, over `list_gcal_events_from_notion()`).
-- **Task lists**: a task's Google Tasks list is derived from its first `Course` relation's title (`notion_target_tasklist_id` → `ensure_tasklist`, cached per run in `_tasklist_cache`); no Course → Google's default "My Tasks" list (its real id is resolved once via the `@default` alias in `get_default_tasklist_id`, since `tasklists().list()` never returns that alias itself). Going the other direction, an unlinked task's list name is resolved to/created as a Notion `Course` page via `ensure_course` (cached in `_course_pages_cache`), using the target database id found through the `Course` relation property's schema (`get_courses_database_id`).
+- **Tasks.** Google Tasks has no field for a Notion page id, so the link lives only in the page's `Google Task ID` property. `importUnlinkedGtasks` imports every unlinked Google Task into Notion, completed ones included (as `Done`). Nothing is skipped.
+- **Events.** Events are tagged with a private extended property, `notion_page_id`. `handleOrphanGcalEvent` uses it to handle a Notion row that was deleted.
+- **Task lists.**
+  - A task's list is named after the title of its first `Course` relation (`notionTargetTasklistId` → `ensureTasklist`).
+  - With no Course, it goes to "My Tasks", whose real id is resolved from the `@default` alias.
+  - In the reverse direction, a list name is found or created as a Course page (`ensureCourse`), in the data source that the `Course` relation's schema points to.
 
 ### Deletions
 
-`DELETE_SYNC` (currently `True`) is a single module-level flag controlling whether deleting one side archives/deletes the other. It is symmetric and covers both kinds: a deleted/archived Notion row deletes its Google Task (`sync_task_pages`'s cleanup loop) or Calendar event, and a Google Task/event that no longer exists archives its Notion page. Setting it to `False` restores the older, non-destructive behavior, where missing counterparts are recreated instead.
+`DELETE_SYNC = true`, and it applies both ways:
 
-Because "missing" is now a deletion order, every lookup that can report something as missing runs its exception through `is_not_found`: a genuine 404/410 (Google `HttpError`) or `object_not_found` (Notion `APIResponseError`) means deleted, and anything else — a rate-limit, a 500, a dropped connection — is re-raised to fail the run. Four call sites depend on this: `get_gcal_event`, `get_gtask`, and the `notion.pages.retrieve` try-blocks in each sync function's cleanup loop. Swallowing broadly there would delete live data on a bad API day; `tests/integration/test_transient_errors_are_not_deletions.py` is the regression test.
+- Deleting or trashing a Notion row deletes its Google Task or Calendar event.
+- A Google Task or event that no longer exists trashes its Notion page.
 
-One ordering subtlety: `sync_task_pages` snapshots `all_gtasks` before the cleanup loop runs, so a task the loop deletes is still in that snapshot when `import_unlinked_gtasks` runs afterward. Without care it would be re-imported as a brand-new Notion row on the very same pass, which is why the loop collects `deleted_task_ids` and passes them through as already-handled.
+Because "missing" means "delete the counterpart", every lookup that can report something as missing goes through `isNotFound`. Only a Google 404/410 or a Notion `object_not_found` counts. Anything else throws and fails the pass. `transient_errors_test.ts` is the regression test.
 
-### CI push-back mechanism
-
-The workflow commits `sync_state.json` after every run, then rebases and retries the push (up to 5 times) since concurrent runs or human pushes may have moved `main` mid-sync. This is why the workflow checks out full history (`fetch-depth: 0`) and configures a `sync-bot` git identity inline.
+There's also an ordering subtlety. `syncTaskPages` snapshots every Google Task before `deleteGtasksForRemovedPages` runs, so that function returns the ids it deleted. `importUnlinkedGtasks` then skips them; without that, they would be re-imported on the same pass.
 
 ## Gotchas when editing
 
-- Property name changes in Notion require matching `PROP_*` constant updates — there's no schema validation, so a mismatch fails silently (property lookups return `None`/empty).
-- Only the date portion of `Due date` is synced; all Calendar events are all-day (no timed events).
-- `client_secret.json` and `token.json` are gitignored and must never be committed — they're the OAuth client secret and user token respectively.
+- If a Notion property is renamed, update the matching `PROP_*` constant. There's no schema validation, so a mismatch fails silently: lookups return null or empty.
+- Only the date part of `Due date` syncs, and all Calendar events are all-day.
+- Adding a Google or Notion call means adding it to the interface in `clients.ts`, to `fakes.ts`, and, if it writes, to `dryRunClients`.
+- The free Supabase project pauses after about 7 days without database activity. Before cutover, the GitHub `sync.yml` keepalive step prevents that. After cutover, the poller's RPCs every 10 minutes do.
+- `client_secret.json` and `token.json` are gitignored and must never be committed.

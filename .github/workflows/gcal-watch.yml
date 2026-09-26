@@ -8,6 +8,11 @@ on:
     - cron: "23 12 */2 * *"
   workflow_dispatch: {}
 
+# The Python version lives in "cron (deprecated)/" until the Supabase cutover.
+defaults:
+  run:
+    working-directory: "cron (deprecated)"
+
 jobs:
   watch:
     runs-on: ubuntu-latest

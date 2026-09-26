@@ -4,3 +4,14 @@ project_id = "nwdulegrvumwcygvohhd"
 # request itself (Notion HMAC signature, Google channel token).
 [functions.relay]
 verify_jwt = false
+
+# Called only by pg_cron, the relay and the poller, which send the shared
+# x-cron-secret header instead of a JWT (see functions/_shared/auth.ts).
+[functions.sync]
+verify_jwt = false
+
+[functions.poll-gtasks]
+verify_jwt = false
+
+[functions.watch-gcal]
+verify_jwt = false

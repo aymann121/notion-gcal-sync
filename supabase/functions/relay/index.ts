@@ -1,17 +1,19 @@
-// Webhook relay: Notion + Google Calendar change notifications -> GitHub
-// repository_dispatch, which runs .github/workflows/sync.yml.
+// Webhook relay: Notion + Google Calendar change notifications -> the `sync`
+// Edge Function. Verifies each notification, then pokes `sync`, whose lease
+// and dirty flag collapse a burst of webhooks into one running + one pending
+// pass.
 //
-// Neither Notion nor Google can call GitHub's API directly (wrong body, no
-// auth header), so this Edge Function verifies each notification and forwards
-// it. It keeps no state: sync.yml's `concurrency: sync` group already collapses
-// a burst of dispatches into one running + one pending run.
+// During the migration it can also still forward to GitHub
+// repository_dispatch (the "cron (deprecated)/" version's sync.yml). That stays on
+// until FORWARD_TO_GITHUB is set to "false" by the cutover runbook in
+// "cron (deprecated)/README.md". `sync` itself no-ops until cutover, so only one side
+// ever writes.
 //
 // Deployed with verify_jwt = false (supabase/config.toml): Notion and Google
 // can't send a Supabase JWT, so the HMAC / channel-token checks below are the
 // authentication.
 
-// Supabase runtime global: keeps the dispatch running after the response.
-declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void };
+import { invokeFunction, runInBackground } from "../_shared/auth.ts";
 
 const env = (name: string) => Deno.env.get(name) ?? "";
 
@@ -51,7 +53,7 @@ async function handleNotion(request: Request): Promise<Response> {
     return new Response("bad signature", { status: 401 });
   }
 
-  // sync.py's own writes (linking ids, mirroring Google edits) come back as
+  // The sync's own writes (linking ids, mirroring Google edits) come back as
   // webhooks authored by this integration's bot. Dropping them keeps each
   // sync from triggering another, no-op sync.
   const botId = env("NOTION_BOT_ID");
@@ -64,7 +66,7 @@ async function handleNotion(request: Request): Promise<Response> {
     return new Response("ignored: own write");
   }
 
-  EdgeRuntime.waitUntil(dispatch("notion-change", body.type));
+  forward("notion-change", body.type);
   return new Response("ok");
 }
 
@@ -77,9 +79,18 @@ function handleGcal(request: Request): Response {
   const state = request.headers.get("X-Goog-Resource-State");
   if (state === "sync") return new Response("ok");
 
-  EdgeRuntime.waitUntil(dispatch("gcal-change", state));
+  forward("gcal-change", state);
   return new Response("ok");
 }
+
+/** Start a sync pass, and during the migration also the GitHub workflow. */
+function forward(eventType: string, detail: string | null) {
+  runInBackground(invokeFunction("sync"));
+  if (env("FORWARD_TO_GITHUB") !== "false") runInBackground(dispatch(eventType, detail));
+}
+
+// GitHub repository_dispatch for the "cron (deprecated)/" version. Remove once the
+// cutover is done and FORWARD_TO_GITHUB is off for good.
 
 async function dispatch(eventType: string, detail: string | null) {
   const res = await fetch(
