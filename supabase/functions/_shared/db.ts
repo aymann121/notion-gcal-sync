@@ -1,5 +1,5 @@
 // Postgres access for the sync functions: the RPCs defined in
-// supabase/migrations/20260926120000_sync_tables.sql, called through
+// supabase/migrations/20260927145816_sync_tables.sql, called through
 // PostgREST as service_role (both env vars are injected into every Edge
 // Function by Supabase).
 
