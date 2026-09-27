@@ -1,4 +1,4 @@
-// The cheap Google Tasks poller, called every 10 minutes by pg_cron. Google Tasks
+// The cheap Google Tasks poller, called every 5 minutes by pg_cron. Google Tasks
 // has no push API, so this asks "anything updated since the cursor?" and only
 // starts a sync pass when the answer is yes.
 //

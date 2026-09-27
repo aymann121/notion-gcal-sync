@@ -16,7 +16,7 @@ A two-way sync between a Notion "Tasks Tracker" database and Google Tasks + Goog
 ```
 Notion webhook ────────┐
 GCal push ─────────────┴─► relay ───────────────┐
-pg_cron */10 * * * * ──► poll-gtasks ─(change)──┼─► sync ─► one pass (sync_core.ts)
+pg_cron */5 * * * * ───► poll-gtasks ─(change)──┼─► sync ─► one pass (sync_core.ts)
 pg_cron 17 9 * * * (daily) ─────────────────────┘      state: sync_state, sync_control
 pg_cron every 2 days ─► watch-gcal (renews the Calendar push channel → relay/gcal)
 ```
@@ -25,7 +25,7 @@ pg_cron every 2 days ─► watch-gcal (renews the Calendar push channel → rel
   - It drops Notion events authored only by the integration's own bot (`NOTION_BOT_ID`), so the sync's own writes don't trigger another sync.
   - Calendar notifications can't be filtered by author, so a pass that writes to Calendar costs one extra no-op pass.
 - **`functions/sync`** marks the sync dirty, answers `202`, and drains the dirty flag in the background (`EdgeRuntime.waitUntil`). `POST ?dry_run=1` instead runs one pass synchronously with writes logged and skipped, saves nothing, and works while disabled.
-- **`functions/poll-gtasks`**: Google Tasks has **no push API**, so this is the cheap poller. Every 10 minutes it compares a signature of all task lists (`id:title`), then asks each list for `updatedMin=<cursor>&maxResults=1` (with deleted, hidden and completed tasks included). It calls `sync` only if something changed. It also restarts leftover work (`dirty` set with the lease free), backing off 10 minutes after a failed pass.
+- **`functions/poll-gtasks`**: Google Tasks has **no push API**, so this is the cheap poller. Every 5 minutes it compares a signature of all task lists (`id:title`), then asks each list for `updatedMin=<cursor>&maxResults=1` (with deleted, hidden and completed tasks included). It calls `sync` only if something changed. It also restarts leftover work (`dirty` set with the lease free), backing off 10 minutes after a failed pass.
 - **`functions/watch-gcal`** opens a 7-day Calendar push channel to `relay/gcal`. pg_cron renews it every 2 days.
 - **pg_cron** jobs (`migrations/*_cron_jobs.sql`) call the functions through `public.invoke_sync_function`, which reads `project_url` and `cron_secret` from Vault.
 
@@ -142,5 +142,5 @@ There's also an ordering subtlety. `syncTaskPages` snapshots every Google Task b
 - If a Notion property is renamed, update the matching `PROP_*` constant. There's no schema validation, so a mismatch fails silently: lookups return null or empty.
 - Only the date part of `Due date` syncs, and all Calendar events are all-day.
 - Adding a Google or Notion call means adding it to the interface in `clients.ts`, to `fakes.ts`, and, if it writes, to `dryRunClients`.
-- The free Supabase project pauses after about 7 days without database activity. Before cutover, the GitHub `sync.yml` keepalive step prevents that. After cutover, the poller's RPCs every 10 minutes do.
+- The free Supabase project pauses after about 7 days without database activity. Before cutover, the GitHub `sync.yml` keepalive step prevents that. After cutover, the poller's RPCs every 5 minutes do.
 - `client_secret.json` and `token.json` are gitignored and must never be committed.

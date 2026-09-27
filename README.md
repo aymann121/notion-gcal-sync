@@ -11,7 +11,7 @@ Calendar. Runs entirely on Supabase.
 ## How it works
 
 - **Notion and Calendar edits** reach the `relay` function as webhooks and sync within seconds.
-- **Google Tasks edits** are picked up by a poller every 10 minutes (Google Tasks can't send webhooks).
+- **Google Tasks edits** are picked up by a poller every 5 minutes (Google Tasks can't send webhooks).
 - **A full sync** also runs once a day, in case anything was missed.
 - If both sides changed, **Notion wins**. Deleting on one side deletes on the other.
 

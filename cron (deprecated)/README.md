@@ -145,7 +145,7 @@ guarantee that:
      -H "x-cron-secret: $CRON_SECRET"
    ```
 7. **Watch it.** Edit a Notion row, a Calendar event and a Google Task. The
-   first two should sync within seconds, and the task within about 10 minutes.
+   first two should sync within seconds, and the task within about 5 minutes.
    `select public.get_sync_control();` should show a fresh `last_pass_at` and a
    null `last_error`.
 
@@ -159,4 +159,4 @@ it, so GitHub resumes from the newest state.
    - Remove `dispatch()` and the `FORWARD_TO_GITHUB` branch from the relay,
      and delete the `GITHUB_TOKEN` / `GITHUB_REPO` secrets.
    - Drop `public.keepalive()` in a new migration. The poller's database
-     calls every 10 minutes keep the project awake now.
+     calls every 5 minutes keep the project awake now.
