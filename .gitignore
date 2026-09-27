@@ -7,3 +7,6 @@ token.json
 client_secret.json
 .env
 .DS_Store
+.mcp.json
+.pytest_cache/
+supabase/.temp/

@@ -1,0 +1,6 @@
+{
+  "tasks": {
+    "test": "deno test --allow-env functions/_shared/tests",
+    "check": "deno check functions/*/index.ts functions/_shared/*.ts functions/_shared/tests/*.ts"
+  }
+}

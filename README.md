@@ -1,133 +1,69 @@
 # Notion ↔ Google Tasks + Calendar Sync
 
-Keeps your **Tasks Tracker** database in sync with **Google Tasks** and
-**Google Calendar**, routed by the `Sync As` property. Runs free on GitHub
-Actions four times a day (10am/2pm/4pm/8pm ET).
+Keeps a Notion **Tasks Tracker** database in sync with Google Tasks and Google
+Calendar. Runs entirely on Supabase.
 
-| `Sync As` | Destination | What syncs |
-|-----------|-------------|------------|
-| `Task` or empty | Google Tasks | Title, due date (optional), Status ↔ completion. Course → task list |
-| `Event` | Google Calendar | Title + due date as an all-day event (both directions) |
+| Notion `Sync As` | Syncs to | What syncs |
+|---|---|---|
+| `Task` or empty | Google Tasks | Title, due date, done/not done. Course → task list |
+| `Event` | Google Calendar | Title + due date as an all-day event |
 
-### Archived tasks
+## How it works
 
-`notion-task-radar` marks Radar tasks `Archived` at 1am when their day ends
-unfinished. This sync treats `Archived` the same as `Done` — the Google Task
-gets ticked off, so missed work clears out of Google Tasks instead of piling
-up. If the task was never in Google, it's created and then completed.
+- **Notion and Calendar edits** reach the `relay` function as webhooks and sync within seconds.
+- **Google Tasks edits** are picked up by a poller every 10 minutes (Google Tasks can't send webhooks).
+- **A full sync** also runs once a day, in case anything was missed.
+- If both sides changed, **Notion wins**. Deleting on one side deletes on the other.
 
-Notion keeps the distinction Google can't express: the row stays `Archived`,
-not `Done`, so you can still tell what you missed from what you finished.
-Un-ticking the task in Google brings the Notion row back to `Not started`.
+## Setup
 
-## 1. Notion setup
+You need the [Supabase CLI](https://supabase.com/docs/guides/cli) and a
+`token.json` from `get_google_token.py` in the legacy folder.
 
-1. Go to https://www.notion.so/my-integrations → **New integration**.
-   - Give it a name (e.g. "Google Sync"), select your workspace.
-   - Copy the **Internal Integration Token** — this is `NOTION_TOKEN`.
-2. Open your **Tasks Tracker** database in Notion → **···** menu (top right)
-   → **Connections** → add the integration you just created.
-3. Ensure these properties exist (names must match exactly):
-   - **Text:** `Google Event ID`, `Google Task ID` (script-managed — leave blank)
-   - **Select:** `Sync As` with options `Task` and `Event`
-   - **Status:** `Status` with at least `Not started`, `In progress`, `Done`,
-     and `Archived` (orange, in the **Complete** group). The Notion API cannot
-     create status options, so `Archived` must be added by hand: Status column
-     header → **Edit property** → **+ Add option**.
-   - **Relation:** `Course` (to your Courses database)
-   - **Title / Date:** `Task name`, `Due date`
-4. Get your database ID: open the database as a full page, copy the URL —
-   the 32-character string right after your workspace name and before the
-   `?v=` is your `NOTION_DATABASE_ID`.
-
-## 2. Google setup (Calendar + Tasks)
-
-1. Go to https://console.cloud.google.com/ → create a project.
-2. **APIs & Services → Library** → enable both:
-   - **Google Calendar API**
-   - **Google Tasks API**
-3. **APIs & Services → Credentials → Create Credentials → OAuth client ID**.
-   - If prompted, configure the consent screen first (choose "External",
-     add yourself as a test user — this is fine for personal use).
-   - Application type: **Desktop app**.
-   - Download the JSON → save it as `client_secret.json` in this folder.
-4. On your own computer (not GitHub Actions), run:
+1. **Set secrets**
+   ```bash
+   supabase secrets set NOTION_TOKEN=... NOTION_DATABASE_ID=... \
+     GOOGLE_TOKEN_JSON="$(cat token.json)" GOOGLE_CALENDAR_ID=primary \
+     CRON_SECRET=$(openssl rand -hex 32)
    ```
-   pip install -r requirements.txt
-   python get_google_token.py
+2. **Add Vault secrets** (Supabase SQL editor), so the scheduled jobs can call the functions:
+   ```sql
+   select vault.create_secret('https://<project-ref>.supabase.co', 'project_url');
+   select vault.create_secret('<your CRON_SECRET>', 'cron_secret');
    ```
-   This opens a browser, asks you to log in (Calendar + Tasks scopes), and
-   creates `token.json`. If you already had a token from Calendar-only auth,
-   re-run this so Tasks permission is included.
-5. Decide which calendar to use for **Event** rows. For your primary calendar,
-   use `GOOGLE_CALENDAR_ID=primary`. To use a separate calendar (recommended),
-   create one in Google Calendar, open its settings, and copy its **Calendar ID**.
+3. **Deploy**
+   ```bash
+   supabase db push
+   supabase functions deploy sync
+   supabase functions deploy poll-gtasks
+   supabase functions deploy watch-gcal
+   supabase functions deploy relay
+   ```
+4. **Turn it on** (SQL editor):
+   ```sql
+   update public.sync_control set enabled = true, dirty = true where id = 1;
+   ```
 
-### How Tasks routing works
+> Migrating from the old GitHub Actions version? Don't do step 4 on its own.
+> Follow the cutover runbook in the legacy folder's README instead, so the
+> two versions never run at the same time.
 
-- Each Notion task’s first **Course** relation becomes a **Google Task list**
-  (created if it doesn’t exist). No course → Google’s default **My Tasks** list.
-- Notion `Status = Done` ↔ Google Task `completed`; anything else ↔
-  `needsAction`. Completing a task in Google Tasks (or the Calendar sidebar)
-  sets Notion to `Done`, and vice versa.
-- Creating a task directly in Google Tasks (in any list, including My Tasks)
-  creates the matching Notion row on the next sync — creating a new **Course**
-  page too if the list name doesn’t already match one. Nothing is skipped:
-  tasks you already ticked off are imported too, as `Status = Done`, so every
-  Google Task ends up with a Notion row.
+## Check it's working
 
-### How Event routing works
+```sql
+select public.get_sync_control();  -- last_pass_at should be recent, last_error null
+```
 
-- Event rows with a due date become all-day Calendar events; the event id is
-  stored in `Google Event ID`.
-- Events this script created (tagged with a private `notion_page_id`) can
-  recreate a Notion row if the Notion page is deleted (`Sync As = Event`).
+Function logs are in the Supabase dashboard → Edge Functions.
 
-## 3. GitHub setup
+## Tests
 
-1. Create a new **private** GitHub repo, push these files to it.
-2. Repo → **Settings → Secrets and variables → Actions → New repository
-   secret**. Add these four secrets:
-   - `NOTION_TOKEN` — from step 1
-   - `NOTION_DATABASE_ID` — from step 1
-   - `GOOGLE_CALENDAR_ID` — from step 2
-   - `GOOGLE_TOKEN_JSON` — paste the full contents of `token.json`
-3. That’s it. The workflow in `.github/workflows/sync.yml` runs four times a
-   day automatically. You can also trigger it manually from the repo’s
-   **Actions** tab → "Notion <-> Google Tasks + Calendar Sync" → **Run workflow**.
+```bash
+cd supabase
+deno task test
+```
 
-## How conflicts are resolved
+## More detail
 
-Each sync run compares Notion’s `last_edited_time` against Google’s
-`updated` timestamp for every linked pair, since the last successful sync:
-
-- Only Notion changed → Google is updated to match.
-- Only Google changed → Notion is updated to match.
-- Both changed → **Notion wins** (edit `sync.py` if you’d rather Google win).
-
-If you change `Sync As` between Task and Event, the script creates a link on
-the new side and deletes the old Google object, since `DELETE_SYNC` is on.
-
-## Deletions
-
-Deleting a task or event deletes its counterpart (`DELETE_SYNC = True` in
-`sync.py`). It works both ways: deleting a Notion row deletes its Google Task
-or Calendar event, and deleting a Google Task archives its Notion row. Set the
-flag back to `False` for the older, non-destructive behavior, where a missing
-counterpart is recreated rather than propagated.
-
-Because a missing object is now taken as an instruction to delete, the script
-refuses to guess: only a real 404 from Notion or Google counts as "deleted".
-A rate-limit or a server error fails the run instead, so a bad API day can’t
-wipe out data. A failed run is safe to just re-run — nothing is committed to
-`sync_state.json` until the pass finishes.
-
-## Limitations
-
-- Event path only syncs `Task name` and `Due date` (all-day); no timed events.
-- Task path does not sync Priority, Effort level, or subtasks.
-- Recurring items aren’t handled specially.
-- Existing all-day Calendar events that were really tasks are not migrated
-  automatically — set `Sync As = Task` on those rows (old `Google Event ID`
-  can be cleared manually if desired).
-- If you rename Notion properties, update the `PROP_*` constants in `sync.py`.
+- `CLAUDE.md`: architecture, sync rules, and gotchas.
+- `cron (deprecated)/README.md`: the old GitHub Actions version and the cutover runbook.

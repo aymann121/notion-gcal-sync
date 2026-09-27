@@ -21,6 +21,12 @@ concurrency:
   group: sync
   cancel-in-progress: false
 
+# The Python sync lives in "cron (deprecated)/" while the Supabase version takes over;
+# see "cron (deprecated)/README.md" for the cutover runbook.
+defaults:
+  run:
+    working-directory: "cron (deprecated)"
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -49,7 +55,8 @@ jobs:
       - name: Restore sync state
         uses: actions/cache@v4
         with:
-          path: sync_state.json
+          # Workspace-relative: actions/cache ignores defaults.run.working-directory.
+          path: cron (deprecated)/sync_state.json
           key: sync-state-${{ github.run_id }}
           restore-keys: sync-state-
 

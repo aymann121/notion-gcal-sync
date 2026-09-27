@@ -125,7 +125,7 @@ def _normalize_properties(properties):
     arrays written as `{"text": {"content": ...}}` (the shape sync.py's
     setters send), the real API echoes back a "plain_text" field alongside
     it. Our fake stores exactly what call sites send it, so without this
-    normalization step, values written via set_notion_title/set_rich_text
+    normalization step, values written via title_value/text_value
     would be unreadable by notion_title/rich_text_plain immediately after.
     """
     for prop in properties.values():
