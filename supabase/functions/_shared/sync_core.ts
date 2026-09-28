@@ -139,6 +139,19 @@ export function lastSyncDt(state: SyncState, pageId: string): number {
   return lastSync ? parseDt(lastSync) : -Infinity;
 }
 
+/** Did the Notion row change since last_sync?
+ *
+ * Notion truncates last_edited_time to the minute, so an edit made later in
+ * the same minute as the last sync reads as older than it. An edit in that
+ * minute counts as a change unless Google changed too: then the certain
+ * Google change wins over the possible Notion one.
+ */
+export function notionChangedSince(notionEdited: number, last: number, googleChanged: boolean): boolean {
+  if (notionEdited > last) return true;
+  const lastMinute = Math.floor(last / 60_000) * 60_000;
+  return notionEdited >= lastMinute && !googleChanged;
+}
+
 /** State record for a Notion row linked to a Calendar event. */
 export function eventStateEntry(eventId: string): StateEntry {
   return { last_sync: utcNowIso(), kind: "event", event_id: eventId };
@@ -681,8 +694,8 @@ export async function syncLinkedEventPage(
   // Decide which side wins since last_sync
   const googleUpdated = parseDt(event.updated);
   const last = lastSyncDt(state, pageId);
-  const notionChanged = notionEdited > last;
   const googleChanged = googleUpdated > last;
+  const notionChanged = notionChangedSince(notionEdited, last, googleChanged);
 
   if (notionChanged) {
     // Notion-only change, or both changed (Notion wins)
@@ -817,8 +830,8 @@ export async function syncLinkedTaskPage(
 
   const googleUpdated = parseDt(task.updated);
   const last = lastSyncDt(state, pageId);
-  const notionChanged = notionEdited > last;
   const googleChanged = googleUpdated > last;
+  const notionChanged = notionChangedSince(notionEdited, last, googleChanged);
 
   if (notionChanged) {
     // Notion-only change, or both changed (Notion wins).

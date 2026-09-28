@@ -118,6 +118,36 @@ Deno.test("neither changed → no writes, last_sync refreshed", async () => {
   assertNotEquals(state["page-1"].last_sync, "2026-01-02T00:00:00Z");
 });
 
+// Notion reports last_edited_time truncated to the minute: an edit at
+// 15:36:21 reads as 15:36:00, before a 15:36:06 sync.
+Deno.test("Notion edit later in the same minute as the last sync still pushes", async () => {
+  const [f, ctx] = setup();
+  const page = f.notion.addPage(makeTaskPage("page-1", {
+    status: "Done",
+    gtaskId: "task-1",
+    lastEditedTime: "2026-09-27T15:36:00.000Z",
+  }));
+  f.gtasks.addTask(DEFAULT_TASKLIST_ID, makeGtask("task-1", { updated: "2026-09-27T15:30:00Z" }));
+
+  await syncTaskPages(ctx, { "page-1": taskState("task-1", "2026-09-27T15:36:06Z") }, [page]);
+
+  assertEquals(f.gtasks.in(DEFAULT_TASKLIST_ID).get("task-1").status, "completed");
+});
+
+Deno.test("same-minute Notion edit yields to a Google change", async () => {
+  const [f, ctx] = setup();
+  const page = f.notion.addPage(makeTaskPage("page-1", {
+    gtaskId: "task-1",
+    lastEditedTime: "2026-09-27T15:36:00.000Z",
+  }));
+  f.gtasks.addTask(DEFAULT_TASKLIST_ID, makeGtask("task-1", { status: "completed", updated: "2026-09-27T15:36:40Z" }));
+
+  await syncTaskPages(ctx, { "page-1": taskState("task-1", "2026-09-27T15:36:06Z") }, [page]);
+
+  assertEquals(notionStatus(page), "Done");
+  assertEquals(f.gtasks.in(DEFAULT_TASKLIST_ID).get("task-1").status, "completed");
+});
+
 Deno.test("clearing the due date in Notion clears it on the Google Task", async () => {
   const [f, ctx] = setup();
   const page = f.notion.addPage(makeTaskPage("page-1", { gtaskId: "task-1", lastEditedTime: "2026-01-02T00:00:00Z" }));

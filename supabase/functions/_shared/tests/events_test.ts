@@ -94,6 +94,22 @@ Deno.test("neither changed → no writes, last_sync refreshed", async () => {
   assertNotEquals(state["page-1"].last_sync, "2026-01-02T00:00:00Z");
 });
 
+// Notion reports last_edited_time truncated to the minute.
+Deno.test("Notion edit later in the same minute as the last sync still pushes", async () => {
+  const [f, ctx] = setup();
+  const page = f.notion.addPage(makeEventPage("page-1", {
+    title: "Renamed",
+    due: "2026-10-01",
+    gcalId: "event-1",
+    lastEditedTime: "2026-09-27T15:36:00.000Z",
+  }));
+  f.gcal.addEvent(makeGcalEvent("event-1", { title: "Old", date: "2026-10-01", updated: "2026-09-27T15:30:00Z" }));
+
+  await syncEventPages(ctx, { "page-1": eventState("event-1", "2026-09-27T15:36:06Z") }, [page]);
+
+  assertEquals(f.gcal.events.get("event-1").summary, "Renamed");
+});
+
 Deno.test("missing Calendar event is recreated when DELETE_SYNC is false", async () => {
   const [f, ctx] = setup(false);
   const page = f.notion.addPage(makeEventPage("page-1", { due: "2026-09-01", gcalId: "missing-event" }));

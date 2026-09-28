@@ -101,6 +101,7 @@ For every linked pair, compare Notion's `last_edited_time` and Google's `updated
 
 - If only one side changed, the other side is updated to match.
 - If both changed, **Notion wins**. This is a hardcoded branch, not a config flag.
+- Notion truncates `last_edited_time` to the minute, so an edit made later in the same minute as `last_sync` looks older than the sync. `notionChangedSince` counts an edit in that minute as a Notion change, unless Google also changed, in which case Google wins.
 - If a row isn't linked yet, a new object is created on the other side, and its id is written back onto the Notion page (`Google Event ID` / `Google Task ID`).
 
 ### Archived tasks
